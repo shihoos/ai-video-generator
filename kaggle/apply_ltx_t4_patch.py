@@ -234,68 +234,91 @@ def patch_pipeline():
         )
 
     # ========================================================
-    # FIX 2: ACTUALLY FORCE THE LTX GENERATION DEVICE
+    # FIX 2: FORCE THE ACTUAL LTX GENERATION DEVICE
     #
     # IMPORTANT:
-    # The previous version only recorded an execution device on
-    # the pipeline object. That is NOT sufficient because LTX
-    # __call__ obtains its local `device` from Diffusers'
-    # `_execution_device`, which becomes CPU when components are
-    # offloaded.
+    # Diffusers' self._execution_device becomes CPU when CPU
+    # offload is active. LTX 0.9.8 then does:
     #
-    # That produced:
+    #     device = self._execution_device
     #
-    #   device    = CPU
-    #   generator = CUDA
+    # and passes that device to prepare_latents(), while
+    # generate.py supplies a CUDA generator.
     #
-    # and failed inside diffusers.randn_tensor().
+    # That produces:
     #
-    # We therefore patch the local execution-device assignment
-    # so every generation operation in this pipeline uses the
-    # explicitly selected LTX execution device.
+    #     Cannot generate a cpu tensor from a generator of type cuda
+    #
+    # We patch the assignment itself. The replacement preserves
+    # the original indentation, so nested methods/blocks remain
+    # syntactically valid.
     # ========================================================
 
-    old_execution_device = """        device = self._execution_device
-"""
+    execution_pattern = re.compile(
+        r"^(?P<indent>[ \t]+)device = self\._execution_device\s*$",
+        re.MULTILINE,
+    )
 
-    new_execution_device = """        # LTX T4 execution-device fix:
-        # Diffusers may report CPU because components are
-        # offloaded. The actual LTX generation tensors must use
-        # the explicit execution device selected by inference.py.
-        device = getattr(
-            self,
-            "_ltx_execution_device",
-            self._execution_device,
-        )
-"""
+    execution_replacement = (
+        r'\g<indent># LTX T4: use the real generation device, not '
+        r'Diffusers offload storage device.\n'
+        r'\g<indent>device = getattr(\n'
+        r'\g<indent>    self,\n'
+        r'\g<indent>    "_ltx_execution_device",\n'
+        r'\g<indent>    self._execution_device,\n'
+        r'\g<indent>)'
+    )
 
-    execution_device_occurrences = text.count(old_execution_device)
+    text, execution_count = execution_pattern.subn(
+        execution_replacement,
+        text,
+    )
 
-    if new_execution_device in text:
-        print("✅ LTX execution device patch already present")
-
-    elif execution_device_occurrences == 0:
-        raise RuntimeError(
-            "Could not find `device = self._execution_device` in "
-            "pipeline_ltx_video.py. Cannot safely patch generation device."
-        )
-
+    if execution_count == 0:
+        # If a previous compatible patch is already present, leave it.
+        if 'device = getattr(\n            self,\n            "_ltx_execution_device",' in text:
+            print("✅ LTX generation-device patch already present")
+        else:
+            raise RuntimeError(
+                "Could not find the LTX `device = self._execution_device` "
+                "assignment in pipeline_ltx_video.py."
+            )
     else:
-        # The 0.9.8 source contains more than one pipeline __call__
-        # implementation (the base video pipeline and the multi-scale
-        # wrapper). Both can derive their local device from Diffusers'
-        # _execution_device when CPU offload is enabled.
-        #
-        # Replace ALL exact assignments so neither layer can silently
-        # switch the actual generation device back to CPU.
-        text = text.replace(
-            old_execution_device,
-            new_execution_device,
+        print(
+            f"✅ Patched {execution_count} LTX generation-device assignment(s)"
         )
 
-        print(
-            f"✅ Patched {execution_device_occurrences} "
-            "LTX execution-device assignments"
+    # ========================================================
+    # FIX 2B: TRANSFORMER MUST FOLLOW THE SAME GENERATION DEVICE
+    #
+    # The clean LTX code moves the transformer to
+    # self._execution_device. Under CPU offload that can be CPU,
+    # even though generation tensors are CUDA.
+    #
+    # Use the already-resolved local `device` instead.
+    # ========================================================
+
+    old_transformer_device = (
+        "        self.transformer = self.transformer.to(self._execution_device)\n"
+    )
+
+    new_transformer_device = (
+        "        self.transformer = self.transformer.to(device)\n"
+    )
+
+    if old_transformer_device in text:
+        text = replace_once(
+            text,
+            old_transformer_device,
+            new_transformer_device,
+            "move transformer to the actual LTX generation device",
+        )
+        print("✅ Transformer now follows the explicit generation device")
+    elif new_transformer_device in text:
+        print("✅ Transformer generation-device patch already present")
+    else:
+        raise RuntimeError(
+            "Could not find the LTX transformer device assignment."
         )
 
     # ========================================================
@@ -470,7 +493,35 @@ def verify_patch():
     checks = []
 
     # ========================================================
-    # T5 must not be unconditionally moved to CUDA.
+    # Syntax check FIRST.
+    #
+    # This prevents a broken patch from reaching generation.
+    # ========================================================
+
+    compile_cmd = (
+        f"{sys.executable} -m py_compile "
+        f"{PIPELINE_FILE} {INFERENCE_FILE}"
+    )
+
+    result = subprocess.run(
+        compile_cmd,
+        shell=True,
+        text=True,
+        capture_output=True,
+    )
+
+    if result.returncode != 0:
+        print(result.stdout)
+        print(result.stderr)
+        raise RuntimeError(
+            "Patched LTX Python source failed py_compile. "
+            "Generation will not be started."
+        )
+
+    print("✅ Patched LTX source passes Python syntax check")
+
+    # ========================================================
+    # T5 CPU-offload check.
     # ========================================================
 
     t5_cpu_check = (
@@ -488,80 +539,81 @@ def verify_patch():
     )
 
     # ========================================================
-    # pipeline.to(device) must not remain in inference.py.
+    # pipeline.to(device) must not move the whole pipeline.
     # ========================================================
-
-    pipeline_to_check = (
-        "pipeline = pipeline.to(device)"
-        not in inference
-    )
 
     checks.append(
         (
-            "pipeline.to(device) no longer moves T5 to GPU",
-            pipeline_to_check,
+            "pipeline.to(device) removed from inference",
+            "pipeline = pipeline.to(device)" not in inference,
         )
     )
 
     # ========================================================
-    # Direct T5 transfer must not remain in inference.py.
+    # Direct T5 transfer must not remain.
     # ========================================================
-
-    direct_t5_check = (
-        "text_encoder = text_encoder.to(device)"
-        not in inference
-    )
 
     checks.append(
         (
-            "T5 no longer explicitly moved to GPU in inference.py",
-            direct_t5_check,
+            "Direct T5 GPU transfer removed from inference",
+            "text_encoder = text_encoder.to(device)" not in inference,
         )
     )
 
     # ========================================================
-    # Explicit LTX execution device.
+    # Explicit execution device configured.
     # ========================================================
-
-    execution_device_check = (
-        "pipeline._ltx_execution_device = torch.device(device)"
-        in inference
-    )
 
     checks.append(
         (
             "Explicit LTX execution device configured",
-            execution_device_check,
+            "pipeline._ltx_execution_device = torch.device(device)"
+            in inference,
         )
     )
 
     # ========================================================
-    # Actual execution-device assignment.
+    # Actual generation assignment must use the explicit device.
     # ========================================================
 
-    execution_device_patch_check = (
-        "device = self._execution_device" not in pipeline
-        and pipeline.count("device = getattr(") >= 1
-        and "_ltx_execution_device" in pipeline
-        and "self._execution_device" in pipeline
+    generation_device_check = (
+        'device = getattr(\n'
+        '            self,\n'
+        '            "_ltx_execution_device",'
+        in pipeline
     )
 
     checks.append(
         (
-            "LTX generation device overrides Diffusers CPU offload device",
-            execution_device_patch_check,
+            "LTX generation device overrides Diffusers offload device",
+            generation_device_check,
         )
     )
 
-    # No unpatched Diffusers execution-device assignment may remain.
-    no_unpatched_execution_device = (
-        "device = self._execution_device" not in pipeline
-    )
+    # ========================================================
+    # No raw execution-device assignment should remain.
+    #
+    # This is intentionally checked after patching. A clean
+    # source can contain the assignment; the patched source must
+    # not use it for the generation-local `device`.
+    # ========================================================
 
     checks.append(
         (
-            "No unpatched Diffusers CPU execution-device assignment remains",
-            no_unpatched_execution_device,
+            "No unpatched Diffusers execution-device assignment remains",
+            "device = self._execution_device" not in pipeline,
+        )
+    )
+
+    # ========================================================
+    # Transformer follows local generation device.
+    # ========================================================
+
+    checks.append(
+        (
+            "Transformer uses the local generation device",
+            "self.transformer = self.transformer.to(device)"
+            in pipeline,
         )
     )
 
@@ -569,55 +621,39 @@ def verify_patch():
     # Attention masks.
     # ========================================================
 
-    prompt_mask_check = (
-        "prompt_attention_mask = prompt_attention_mask.to(device)"
-        in pipeline
-    )
-
-    negative_mask_check = (
-        "negative_prompt_attention_mask = ("
-        in pipeline
-        and ".to(device)" in pipeline
-    )
-
     checks.append(
         (
-            "Prompt attention mask moved to execution device",
-            prompt_mask_check,
+            "Prompt attention mask moved to generation device",
+            "prompt_attention_mask = prompt_attention_mask.to(device)"
+            in pipeline,
         )
     )
 
     checks.append(
         (
-            "Negative prompt attention mask moved to execution device",
-            negative_mask_check,
+            "Negative attention mask moved to generation device",
+            "negative_prompt_attention_mask = ("
+            in pipeline
+            and ".to(device)" in pipeline,
         )
-    )
-
-    # ========================================================
-    # Actual attention-mask concatenation remains present.
-    # ========================================================
-
-    concat_check = (
-        "prompt_attention_mask_batch = torch.cat("
-        in pipeline
     )
 
     checks.append(
         (
-            "Prompt attention-mask concatenation present",
-            concat_check,
+            "Attention-mask concatenation present",
+            "prompt_attention_mask_batch = torch.cat("
+            in pipeline,
         )
     )
 
     # ========================================================
-    # prepare_latents must use device and generator.
+    # prepare_latents() must receive both device and generator.
     # ========================================================
 
     prepare_latents_check = bool(
         re.search(
-            r"self\.prepare_latents\([\s\S]{0,2500}?"
-            r"device=device,[\s\S]{0,2500}?"
+            r"self\.prepare_latents\([\s\S]{0,3000}?"
+            r"device=device,[\s\S]{0,3000}?"
             r"generator=generator,",
             pipeline,
             re.MULTILINE,
@@ -626,19 +662,18 @@ def verify_patch():
 
     checks.append(
         (
-            "Latent generation uses explicit device and generator",
+            "prepare_latents receives the local generation device",
             prepare_latents_check,
         )
     )
 
     # ========================================================
-    # Print results.
+    # Print all checks.
     # ========================================================
 
     failed = False
 
     for description, result in checks:
-
         if result:
             print(f"✅ {description}")
         else:
@@ -646,13 +681,11 @@ def verify_patch():
             failed = True
 
     if failed:
-
         print("\n" + "=" * 60)
         print("❌ PATCH VERIFICATION FAILED")
         print("=" * 60)
-
         raise RuntimeError(
-            "One or more T4 memory/device patch checks failed."
+            "One or more LTX T4 patch checks failed."
         )
 
     print("\n" + "=" * 60)
