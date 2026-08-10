@@ -3,264 +3,221 @@ import re
 import subprocess
 import sys
 
-PROJECT_ROOT = Path("/kaggle/working/ai-video-generator")
-LTX_REPO = PROJECT_ROOT / "LTX-Video-0.9.8"
-INFERENCE_FILE = LTX_REPO / "ltx_video" / "inference.py"
-PIPELINE_FILE = LTX_REPO / "ltx_video" / "pipelines" / "pipeline_ltx_video.py"
-REVISION = "bdc8f01"
-
-
-def fail(message: str):
-    raise RuntimeError(message)
+PROJECT_ROOT = Path('/kaggle/working/ai-video-generator')
+LTX_REPO = PROJECT_ROOT / 'LTX-Video-0.9.8'
+INFERENCE_FILE = LTX_REPO / 'ltx_video' / 'inference.py'
+PIPELINE_FILE = LTX_REPO / 'ltx_video' / 'pipelines' / 'pipeline_ltx_video.py'
+REVISION = 'bdc8f01'
 
 
 def run(cmd):
-    print(f"\n$ {cmd}")
+    print(f'\n$ {cmd}')
     result = subprocess.run(cmd, shell=True, text=True)
-    if result.returncode:
-        raise RuntimeError(f"Command failed: {cmd}")
+    if result.returncode != 0:
+        raise RuntimeError(f'Command failed: {cmd}')
 
 
-def replace_once(text, old, new, description):
-    count = text.count(old)
-    if count != 1:
-        raise RuntimeError(
-            f"Expected exactly one occurrence for {description}, found {count}."
-        )
-    return text.replace(old, new, 1)
-
-
-def restore():
+def restore_clean_source():
     run(
-        f"git -C {LTX_REPO} checkout {REVISION} -- "
-        f"ltx_video/inference.py ltx_video/pipelines/pipeline_ltx_video.py"
+        f'git -C {LTX_REPO} checkout {REVISION} -- '
+        f'ltx_video/inference.py ltx_video/pipelines/pipeline_ltx_video.py'
     )
+    print(f'✅ LTX files restored from clean revision {REVISION}')
+
+
+def replace_required(text, pattern, replacement, description, flags=re.MULTILINE):
+    new_text, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    if count != 1:
+        raise RuntimeError(f'Could not find exactly one block for: {description} (found {count})')
+    return new_text
 
 
 def patch_inference():
-    text = INFERENCE_FILE.read_text(encoding="utf-8")
+    print('\n' + '=' * 60)
+    print('PATCHING inference.py')
+    print('=' * 60)
 
-    # Keep the fixes already established for the T4:
-    # - no whole-pipeline .to(cuda)
-    # - no direct T5 .to(cuda)
-    old = """    pipeline = LTXVideoPipeline(**submodel_dict)
-    pipeline = pipeline.to(device)
-    return pipeline
-"""
-    new = """    pipeline = LTXVideoPipeline(**submodel_dict)
+    text = INFERENCE_FILE.read_text(encoding='utf-8')
 
-    # T4: keep T5 on CPU; remember the actual generation device.
-    pipeline._ltx_execution_device = torch.device(device)
+    # 1) Never move the whole Diffusers pipeline to CUDA. That would
+    # move the large T5 encoder onto a 15 GB T4 and cause OOM.
+    pipeline_to_pattern = re.compile(
+        r'(?m)^(?P<i>[ \t]+)pipeline = LTXVideoPipeline\(\*\*submodel_dict\)\n'
+        r'(?P=i)pipeline = pipeline\.to\(device\)\n'
+        r'(?P=i)return pipeline\n'
+    )
+    pipeline_to_replacement = (
+        r'\g<i>pipeline = LTXVideoPipeline(**submodel_dict)\n'
+        r'\n'
+        r'\g<i># T4 memory fix: do not call pipeline.to(device).\n'
+        r'\g<i># That would move the large T5 encoder to GPU. Keep T5 on CPU\n'
+        r'\g<i># and carry the real generation device explicitly.\n'
+        r'\g<i>pipeline._ltx_execution_device = torch.device(device)\n'
+        r'\n'
+        r'\g<i>return pipeline\n'
+    )
+    text, count = pipeline_to_pattern.subn(pipeline_to_replacement, text, count=1)
+    if count:
+        print('✅ Removed whole-pipeline .to(device)')
+    elif 'pipeline._ltx_execution_device = torch.device(device)' in text and 'pipeline = pipeline.to(device)' not in text:
+        print('✅ Whole-pipeline T4 fix already present')
+    else:
+        raise RuntimeError('Could not find create_ltx_video_pipeline() pipeline.to(device) block.')
 
-    return pipeline
-"""
-    if old in text:
-        text = replace_once(
-            text, old, new, "whole-pipeline device transfer"
-        )
+    # 2) Remove direct T5 transfer from inference.py if present.
+    text, count = re.subn(
+        r'(?m)^\s*text_encoder = text_encoder\.to\(device\)\n',
+        '',
+        text,
+        count=1,
+    )
+    if count:
+        print('✅ Removed direct T5 GPU transfer')
+    else:
+        print('ℹ️ No direct T5 GPU transfer remained')
 
-    old_t5 = """    text_encoder = text_encoder.to(device)
-"""
-    if old_t5 in text:
-        text = text.replace(old_t5, "", 1)
+    # 3) Multi-scale: clean LTX creates the latent upsampler from pipeline.device.
+    # That is unsafe after removing pipeline.to(cuda), because Diffusers can report
+    # the pipeline storage/offload device as CPU. Use the explicit generation device.
+    upsampler_pattern = re.compile(
+        r'(?m)^(?P<i>[ \t]+)latent_upsampler = create_latent_upsampler\(\n'
+        r'(?P=i)[ \t]+spatial_upscaler_model_path, pipeline\.device\n'
+        r'(?P=i)\)\n'
+    )
+    upsampler_replacement = (
+        r'\g<i># T4 multi-scale fix: the upsampler must share the first-pass\n'
+        r'\g<i># latent device. Do not use pipeline.device because CPU offload\n'
+        r'\g<i># can make that resolve to CPU.\n'
+        r'\g<i>latent_upsampler = create_latent_upsampler(\n'
+        r'\g<i>    spatial_upscaler_model_path, device\n'
+        r'\g<i>)\n'
+    )
+    text, count = upsampler_pattern.subn(upsampler_replacement, text, count=1)
+    if count:
+        print('✅ Latent upsampler now uses explicit generation device')
+    elif 'spatial_upscaler_model_path, device' in text:
+        print('✅ Latent upsampler explicit-device fix already present')
+    else:
+        raise RuntimeError('Could not find the multi-scale latent upsampler creation block.')
 
-    # CRITICAL MULTI-SCALE FIX:
-    # The clean LTX 0.9.8 inference code creates the latent
-    # upsampler using `pipeline.device`. Because we deliberately
-    # keep T5 on CPU, Diffusers can report pipeline.device as CPU.
-    # The first-pass latents, however, are CUDA tensors.
-    #
-    # Therefore the upsampler must be created on the explicit
-    # LTX generation device, not pipeline.device.
-    old_upsampler = """        latent_upsampler = create_latent_upsampler(
-            spatial_upscaler_model_path, pipeline.device
-        )
-"""
-    new_upsampler = """        # T4 / multi-scale device fix:
-        # `pipeline.device` can resolve to CPU because T5 is kept
-        # on CPU for memory reasons. The first-pass latents are
-        # generated on the explicit CUDA execution device.
-        # Create the latent upsampler on that same device.
-        latent_upsampler = create_latent_upsampler(
-            spatial_upscaler_model_path, device
-        )
-"""
-    if old_upsampler in text:
-        text = replace_once(
-            text,
-            old_upsampler,
-            new_upsampler,
-            "multi-scale latent upsampler device",
-        )
-        print("✅ Latent upsampler now uses explicit generation device")
-    elif new_upsampler not in text:
-        raise RuntimeError(
-            "Could not find the multi-scale latent upsampler creation block."
-        )
-
-    INFERENCE_FILE.write_text(text, encoding="utf-8")
+    INFERENCE_FILE.write_text(text, encoding='utf-8')
 
 
 def patch_pipeline():
-    text = PIPELINE_FILE.read_text(encoding="utf-8")
+    print('\n' + '=' * 60)
+    print('PATCHING pipeline_ltx_video.py')
+    print('=' * 60)
 
-    # T5 CPU offload.
-    old_t5 = """        # 3. Encode input prompt
-        if self.text_encoder is not None:
-            self.text_encoder = self.text_encoder.to(self._execution_device)
-"""
-    new_t5 = """        # 3. Encode input prompt
-        if self.text_encoder is not None:
-            if not offload_to_cpu:
-                self.text_encoder = self.text_encoder.to(
-                    self._execution_device
-                )
-"""
-    if old_t5 in text:
-        text = replace_once(text, old_t5, new_t5, "T5 CPU offload")
+    text = PIPELINE_FILE.read_text(encoding='utf-8')
 
-    # Resolve generation-local device without relying on Diffusers'
-    # CPU offload storage device.
-    pattern = re.compile(
-        r"^(?P<i>[ \t]+)device = self\._execution_device\s*$",
+    # 1) Use the explicit generation device inside every LTXVideoPipeline.__call__
+    # local device assignment. Regex preserves indentation and is intentionally
+    # applied to all matching assignments in the clean revision.
+    device_pattern = re.compile(
+        r'^(?P<i>[ \t]+)device = self\._execution_device\s*$',
         re.MULTILINE,
     )
-    replacement = (
-        r"\g<i># T4: use explicit generation device when available.\n"
-        r'\g<i>device = getattr(self, "_ltx_execution_device", '
-        r"self._execution_device)"
+    device_replacement = (
+        r'\g<i># T4: Diffusers CPU offload can report _execution_device as CPU.\n'
+        r'\g<i># Use the explicit generation device when inference.py provides it.\n'
+        r'\g<i>device = getattr(self, "_ltx_execution_device", self._execution_device)'
     )
-    text, count = pattern.subn(replacement, text)
+    text, device_count = device_pattern.subn(device_replacement, text)
+    if device_count == 0:
+        if 'device = getattr(self, "_ltx_execution_device", self._execution_device)' in text:
+            print('✅ Explicit generation-device override already present')
+        else:
+            raise RuntimeError('Could not find LTX execution-device assignment.')
+    else:
+        print(f'✅ Patched {device_count} LTX execution-device assignment(s)')
 
-    if count == 0 and 'device = getattr(self, "_ltx_execution_device"' not in text:
-        raise RuntimeError(
-            "Could not find the LTX execution-device assignment."
-        )
-
-    # Transformer must follow the same generation device.
-    old_transformer = (
-        "        self.transformer = self.transformer.to(self._execution_device)\n"
+    # 2) Keep T5 on CPU when offloading. Match the actual clean 0.9.8 block.
+    t5_pattern = re.compile(
+        r'(?m)^(?P<i>[ \t]+)# 3\. Encode input prompt\n'
+        r'(?P=i)if self\.text_encoder is not None:\n'
+        r'(?P=i)    self\.text_encoder = self\.text_encoder\.to\(self\._execution_device\)\n'
     )
-    new_transformer = (
-        "        self.transformer = self.transformer.to(device)\n"
+    t5_replacement = (
+        r'\g<i># 3. Encode input prompt\n'
+        r'\g<i>if self.text_encoder is not None:\n'
+        r'\g<i>    # T4 memory fix: keep the large T5 encoder on CPU while offloading.\n'
+        r'\g<i>    if not offload_to_cpu:\n'
+        r'\g<i>        self.text_encoder = self.text_encoder.to(device)\n'
     )
-    if old_transformer in text:
-        text = replace_once(
-            text,
-            old_transformer,
-            new_transformer,
-            "transformer generation device",
-        )
+    text, t5_count = t5_pattern.subn(t5_replacement, text, count=1)
+    if t5_count:
+        print('✅ T5 stays on CPU when --offload is enabled')
+    elif 'if not offload_to_cpu:' in text and 'self.text_encoder = self.text_encoder.to(device)' in text:
+        print('✅ T5 CPU-offload fix already present')
+    else:
+        raise RuntimeError('Could not find the T5 transfer block.')
 
-    # Prompt masks must match CUDA transformer tensors.
-    old_masks = """        prompt_embeds_batch = torch.cat(
-            [negative_prompt_embeds, prompt_embeds, prompt_embeds], dim=0
-        )
-        prompt_attention_mask_batch = torch.cat(
-            [
-                negative_prompt_attention_mask,
-                prompt_attention_mask,
-                prompt_attention_mask,
-            ],
-            dim=0,
-        )
-"""
-    new_masks = """        prompt_embeds_batch = torch.cat(
-            [negative_prompt_embeds, prompt_embeds, prompt_embeds], dim=0
-        )
+    # 3) Make transformer follow the same explicit generation device.
+    transformer_pattern = re.compile(
+        r'(?m)^(?P<i>[ \t]+)self\.transformer = self\.transformer\.to\(self\._execution_device\)\s*$'
+    )
+    transformer_replacement = r'\g<i>self.transformer = self.transformer.to(device)'
+    text, transformer_count = transformer_pattern.subn(transformer_replacement, text, count=1)
+    if transformer_count:
+        print('✅ Transformer uses explicit generation device')
+    elif 'self.transformer = self.transformer.to(device)' in text:
+        print('✅ Transformer generation-device fix already present')
+    else:
+        raise RuntimeError('Could not find transformer device transfer block.')
 
-        prompt_attention_mask = prompt_attention_mask.to(device)
-        negative_prompt_attention_mask = (
-            negative_prompt_attention_mask.to(device)
-        )
+    # 4) Attention masks must be on the generation device before concatenation.
+    cat_pattern = re.compile(
+        r'(?m)^(?P<i>[ \t]+)prompt_embeds_batch = torch\.cat\(\n'
+        r'(?P=i)    \[negative_prompt_embeds, prompt_embeds, prompt_embeds\], dim=0\n'
+        r'(?P=i)\)\n'
+        r'(?P=i)prompt_attention_mask_batch = torch\.cat\(\n'
+        r'(?P=i)    \[\n'
+        r'(?P=i)        negative_prompt_attention_mask,\n'
+        r'(?P=i)        prompt_attention_mask,\n'
+        r'(?P=i)        prompt_attention_mask,\n'
+        r'(?P=i)    \],\n'
+        r'(?P=i)    dim=0,\n'
+        r'(?P=i)\)\n'
+    )
+    cat_replacement = (
+        r'\g<i>prompt_embeds_batch = torch.cat(\n'
+        r'\g<i>    [negative_prompt_embeds, prompt_embeds, prompt_embeds], dim=0\n'
+        r'\g<i>)\n'
+        r'\n'
+        r'\g<i># T4 device fix: masks must match CUDA transformer tensors.\n'
+        r'\g<i>prompt_attention_mask = prompt_attention_mask.to(device)\n'
+        r'\g<i>negative_prompt_attention_mask = negative_prompt_attention_mask.to(device)\n'
+        r'\n'
+        r'\g<i>prompt_attention_mask_batch = torch.cat(\n'
+        r'\g<i>    [\n'
+        r'\g<i>        negative_prompt_attention_mask,\n'
+        r'\g<i>        prompt_attention_mask,\n'
+        r'\g<i>        prompt_attention_mask,\n'
+        r'\g<i>    ],\n'
+        r'\g<i>    dim=0,\n'
+        r'\g<i>)\n'
+    )
+    text, cat_count = cat_pattern.subn(cat_replacement, text, count=1)
+    if cat_count:
+        print('✅ Attention masks aligned to generation device')
+    elif 'negative_prompt_attention_mask = negative_prompt_attention_mask.to(device)' in text:
+        print('✅ Attention-mask device fix already present')
+    else:
+        raise RuntimeError('Could not find the attention-mask concatenation block.')
 
-        prompt_attention_mask_batch = torch.cat(
-            [
-                negative_prompt_attention_mask,
-                prompt_attention_mask,
-                prompt_attention_mask,
-            ],
-            dim=0,
-        )
-"""
-    if old_masks in text:
-        text = replace_once(
-            text,
-            old_masks,
-            new_masks,
-            "attention-mask device alignment",
-        )
-
-    # Also align masks immediately after CPU T5 encoding, because the
-    # clean code can create them on the T5/device path before concatenation.
-    old_encode = """        ) = self.encode_prompt(
-            prompt,
-            True,
-            negative_prompt=negative_prompt,
-            num_images_per_prompt=num_images_per_prompt,
-            device=device,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            prompt_attention_mask=prompt_attention_mask,
-            negative_prompt_attention_mask=negative_prompt_attention_mask,
-            text_encoder_max_tokens=text_encoder_max_tokens,
-        )
-        if offload_to_cpu and self.text_encoder is not None:
-            self.text_encoder = self.text_encoder.cpu()
-"""
-    new_encode = """        ) = self.encode_prompt(
-            prompt,
-            True,
-            negative_prompt=negative_prompt,
-            num_images_per_prompt=num_images_per_prompt,
-            device=device,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            prompt_attention_mask=prompt_attention_mask,
-            negative_prompt_attention_mask=negative_prompt_attention_mask,
-            text_encoder_max_tokens=text_encoder_max_tokens,
-        )
-
-        if prompt_attention_mask is not None:
-            prompt_attention_mask = prompt_attention_mask.to(device)
-        if negative_prompt_attention_mask is not None:
-            negative_prompt_attention_mask = (
-                negative_prompt_attention_mask.to(device)
-            )
-
-        if offload_to_cpu and self.text_encoder is not None:
-            self.text_encoder = self.text_encoder.cpu()
-"""
-    if old_encode in text:
-        text = replace_once(
-            text,
-            old_encode,
-            new_encode,
-            "post-T5 attention-mask device alignment",
-        )
-
-    # MULTI-SCALE FIX:
-    # Make _upsample_latents self-healing even if an upstream change
-    # or Diffusers device reporting puts the upsampler elsewhere.
-    old_upsample = """    def _upsample_latents(
+    # 5) Replace ONLY the _upsample_latents method body. Do not rely on an exact
+    # whitespace-sensitive source block; locate the method by its class-level
+    # indentation and stop at the next method in LTXMultiScalePipeline.
+    method_pattern = re.compile(
+        r'(?ms)^(?P<i>    )def _upsample_latents\(\n'
+        r'.*?'
+        r'^(?P=i)def __init__\(\n'
+    )
+    method_replacement = '''    def _upsample_latents(
         self, latest_upsampler: LatentUpsampler, latents: torch.Tensor
     ):
-        assert latents.device == latest_upsampler.device
-        latents = un_normalize_latents(
-            latents, self.vae, vae_per_channel_normalize=True
-        )
-        upsampled_latents = latest_upsampler(latents)
-        upsampled_latents = normalize_latents(
-            upsampled_latents, self.vae, vae_per_channel_normalize=True
-        )
-        return upsampled_latents
-"""
-    new_upsample = """    def _upsample_latents(
-        self, latest_upsampler: LatentUpsampler, latents: torch.Tensor
-    ):
-        # T4 / multi-scale device fix:
-        # The first-pass latents are produced on the real generation
-        # device. The latent upsampler must execute on that same device.
+        # T4 multi-scale fix:
+        # The upsampler and first-pass latents must always share a device.
         target_device = latents.device
 
         if latest_upsampler.device != target_device:
@@ -269,7 +226,7 @@ def patch_pipeline():
 
         if latest_upsampler.device != target_device:
             raise RuntimeError(
-                "Latent upsampler could not be moved to the latent device: "
+                "Latent upsampler device mismatch after transfer: "
                 f"latents={target_device}, upsampler={latest_upsampler.device}"
             )
 
@@ -281,80 +238,86 @@ def patch_pipeline():
             upsampled_latents, self.vae, vae_per_channel_normalize=True
         )
 
-        # Release the upsampler from GPU after the first-pass upsample.
-        # The second diffusion pass uses the main LTX transformer instead.
+        # The upsampler is only needed between the first and second passes.
+        # Release its GPU memory before the second pass on a T4.
         if target_device.type == "cuda":
-            latest_upsampler = latest_upsampler.cpu()
+            latest_upsampler.cpu()
             torch.cuda.empty_cache()
 
         return upsampled_latents
-"""
-    if old_upsample in text:
-        text = replace_once(
-            text,
-            old_upsample,
-            new_upsample,
-            "multi-scale latent upsampler device alignment",
-        )
-        print("✅ Multi-scale upsampler now follows latent device")
-    elif new_upsample not in text:
-        raise RuntimeError(
-            "Could not find LTXMultiScalePipeline._upsample_latents()."
-        )
 
-    PIPELINE_FILE.write_text(text, encoding="utf-8")
+    def __init__(
+'''
+    text, method_count = method_pattern.subn(method_replacement, text, count=1)
+    if method_count:
+        print('✅ Replaced LTXMultiScalePipeline._upsample_latents() safely')
+    elif 'def _upsample_latents(' in text and 'Latent upsampler device mismatch after transfer' in text:
+        print('✅ Multi-scale upsampler method already patched')
+    else:
+        raise RuntimeError('Could not locate LTXMultiScalePipeline._upsample_latents() in clean LTX 0.9.8 source.')
+
+    PIPELINE_FILE.write_text(text, encoding='utf-8')
 
 
 def verify():
-    inference = INFERENCE_FILE.read_text(encoding="utf-8")
-    pipeline = PIPELINE_FILE.read_text(encoding="utf-8")
+    print('\n' + '=' * 60)
+    print('VERIFYING PATCHED LTX SOURCE')
+    print('=' * 60)
+
+    inference = INFERENCE_FILE.read_text(encoding='utf-8')
+    pipeline = PIPELINE_FILE.read_text(encoding='utf-8')
 
     for path in (INFERENCE_FILE, PIPELINE_FILE):
         result = subprocess.run(
-            [sys.executable, "-m", "py_compile", str(path)],
+            [sys.executable, '-m', 'py_compile', str(path)],
             capture_output=True,
             text=True,
         )
-        if result.returncode:
+        if result.returncode != 0:
             print(result.stderr)
-            raise RuntimeError(f"Syntax check failed: {path}")
+            raise RuntimeError(f'Python syntax check failed: {path}')
 
-    checks = {
-        "No whole-pipeline CUDA transfer": "pipeline = pipeline.to(device)" not in inference,
-        "T5 direct CUDA transfer removed": "text_encoder = text_encoder.to(device)" not in inference,
-        "Explicit LTX generation device": "_ltx_execution_device = torch.device(device)" in inference,
-        "Upsampler created on explicit device": "spatial_upscaler_model_path, device" in inference,
-        "Generation device override": 'device = getattr(self, "_ltx_execution_device"' in pipeline,
-        "Transformer uses generation device": "self.transformer = self.transformer.to(device)" in pipeline,
-        "Upsampler follows latent device": "target_device = latents.device" in pipeline,
-        "Upsampler device assertion replaced safely": "could not be moved to the latent device" in pipeline,
-        "Prompt mask device alignment": "prompt_attention_mask = prompt_attention_mask.to(device)" in pipeline,
-        "Negative mask device alignment": "negative_prompt_attention_mask = (" in pipeline and ".to(device)" in pipeline,
-    }
+    checks = [
+        ('whole-pipeline .to(device) removed', 'pipeline = pipeline.to(device)' not in inference),
+        ('direct T5 GPU transfer removed', 'text_encoder = text_encoder.to(device)' not in inference),
+        ('explicit LTX generation device set', '_ltx_execution_device = torch.device(device)' in inference),
+        ('upsampler created from explicit device', 'spatial_upscaler_model_path, device' in inference),
+        ('generation device override present', 'device = getattr(self, "_ltx_execution_device", self._execution_device)' in pipeline),
+        ('transformer uses generation device', 'self.transformer = self.transformer.to(device)' in pipeline),
+        ('prompt mask moved to generation device', 'prompt_attention_mask = prompt_attention_mask.to(device)' in pipeline),
+        ('negative mask moved to generation device', 'negative_prompt_attention_mask = negative_prompt_attention_mask.to(device)' in pipeline),
+        ('multi-scale device synchronization present', 'target_device = latents.device' in pipeline),
+        ('upsampler mismatch guard present', 'Latent upsampler device mismatch after transfer' in pipeline),
+        ('clean upstream revision restored before patching', REVISION == 'bdc8f01'),
+    ]
 
-    failed = [name for name, ok in checks.items() if not ok]
-    for name, ok in checks.items():
-        print(("✅ " if ok else "❌ ") + name)
+    failed = []
+    for name, ok in checks:
+        print(('✅ ' if ok else '❌ ') + name)
+        if not ok:
+            failed.append(name)
 
     if failed:
-        raise RuntimeError("Patch verification failed: " + ", ".join(failed))
+        raise RuntimeError('Patch verification failed: ' + ', '.join(failed))
 
-    print("✅ Python syntax checks passed")
-    print("✅ ALL T4 MULTI-SCALE DEVICE CHECKS PASSED")
+    print('\n' + '=' * 60)
+    print('✅ PYTHON SYNTAX CHECKS PASSED')
+    print('✅ ALL T4 MULTI-SCALE DEVICE CHECKS PASSED')
+    print('=' * 60)
 
 
 def main():
-    print("\n" + "=" * 60)
-    print("LTX-VIDEO T4 FINAL MULTI-SCALE DEVICE PATCH")
-    print("=" * 60)
+    print('\n' + '=' * 60)
+    print('LTX-VIDEO 0.9.8 — T4 FINAL DEVICE/OFFLOAD PATCH')
+    print('=' * 60)
 
-    restore()
+    restore_clean_source()
     patch_inference()
     patch_pipeline()
     verify()
 
-    print("\n🚀 LTX T4 multi-scale patch complete.")
+    print('\n🚀 LTX T4 patch complete.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
