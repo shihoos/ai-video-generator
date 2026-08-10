@@ -8,7 +8,6 @@ import sys
 
 PROJECT_ROOT = Path("/kaggle/working/ai-video-generator")
 
-# Make the kaggle directory importable
 KAGGLE_DIR = PROJECT_ROOT / "kaggle"
 
 if str(KAGGLE_DIR) not in sys.path:
@@ -17,15 +16,14 @@ if str(KAGGLE_DIR) not in sys.path:
 from config import (
     LTX_MODEL,
     LTX_UPSCALER,
+    LTX_COMMIT,
     LTX_REPO,
+    LTX_CONFIG,
     WORK_DIR,
     CLIPS_DIR,
     FRAMES_DIR,
     OUTPUT_DIR,
 )
-
-# Exact LTX-Video 0.9.8 revision we tested
-LTX_COMMIT = "bdc8f01"
 
 
 def run(command):
@@ -60,7 +58,7 @@ def check_gpu():
 
 
 # ============================================================
-# PYTHON ENVIRONMENT CHECK
+# PYTHON ENVIRONMENT
 # ============================================================
 
 def check_python_environment():
@@ -73,9 +71,10 @@ def check_python_environment():
         "transformers",
         "diffusers",
         "huggingface_hub",
+        "av",
     ]
 
-    failed = False
+    missing = []
 
     for package in packages:
         try:
@@ -85,14 +84,20 @@ def check_python_environment():
             print(f"✅ {package}: {version}")
 
         except ImportError:
-            print(f"❌ {package}: NOT INSTALLED")
-            failed = True
+            print(f"⚠️ {package}: NOT INSTALLED")
+            missing.append(package)
 
-    if failed:
-        print("\n❌ Required Python packages are missing.")
-        sys.exit(1)
+    # Install only missing dependencies.
+    if missing:
+        print("\nInstalling missing dependencies:")
 
-    # PyTorch CUDA check
+        for package in missing:
+            print(f"  → {package}")
+            run(
+                f"{sys.executable} -m pip install {package}"
+            )
+
+    # Verify PyTorch/CUDA
     import torch
 
     print(f"✅ CUDA available: {torch.cuda.is_available()}")
@@ -119,7 +124,6 @@ def check_models():
     print("MODEL CHECK")
     print("=" * 60)
 
-    # Main LTX model
     if LTX_MODEL.exists():
         size_gb = LTX_MODEL.stat().st_size / (1024 ** 3)
 
@@ -132,7 +136,6 @@ def check_models():
         print(f"Expected: {LTX_MODEL}")
         sys.exit(1)
 
-    # Spatial upscaler
     if LTX_UPSCALER.exists():
         size_mb = LTX_UPSCALER.stat().st_size / (1024 ** 2)
 
@@ -159,7 +162,6 @@ def setup_directories():
         PROJECT_ROOT,
         WORK_DIR,
         CLIPS_DIR,
-        FRAMES_DIR,
         OUTPUT_DIR,
     ]:
         directory.mkdir(
@@ -171,7 +173,7 @@ def setup_directories():
 
 
 # ============================================================
-# LTX-VIDEO REPOSITORY
+# LTX REPOSITORY
 # ============================================================
 
 def setup_ltx_repository():
@@ -179,7 +181,6 @@ def setup_ltx_repository():
     print("LTX-VIDEO REPOSITORY CHECK")
     print("=" * 60)
 
-    # Clone if repository doesn't exist
     if not LTX_REPO.exists():
         print("LTX-Video repository not found.")
         print("Cloning LTX-Video...")
@@ -193,19 +194,19 @@ def setup_ltx_repository():
     else:
         print("✅ LTX-Video repository already exists")
 
-    # Make sure we are on the exact tested revision
-    current_commit = subprocess.run(
-        f"git -C {LTX_REPO} rev-parse HEAD",
+    # Get short commit hash
+    result = subprocess.run(
+        f"git -C {LTX_REPO} rev-parse --short HEAD",
         shell=True,
         capture_output=True,
         text=True,
-    ).stdout.strip()
+    )
+
+    current_commit = result.stdout.strip()
+
+    print(f"Current LTX commit: {current_commit}")
 
     if current_commit != LTX_COMMIT:
-        print(
-            f"Current LTX commit: {current_commit}"
-        )
-
         print(
             f"Switching to tested revision: {LTX_COMMIT}"
         )
@@ -216,9 +217,15 @@ def setup_ltx_repository():
 
     else:
         print(
-            f"✅ LTX-Video revision already correct: "
-            f"{LTX_COMMIT}"
+            f"✅ LTX-Video revision correct: {LTX_COMMIT}"
         )
+
+    if not LTX_CONFIG.exists():
+        print("❌ Official LTX 0.9.8 config not found:")
+        print(LTX_CONFIG)
+        sys.exit(1)
+
+    print(f"✅ LTX configuration found: {LTX_CONFIG}")
 
 
 # ============================================================
@@ -230,7 +237,6 @@ def install_ltx():
     print("LTX PYTHON PACKAGE CHECK")
     print("=" * 60)
 
-    # Test whether the package is already importable
     test = subprocess.run(
         [
             sys.executable,
@@ -251,10 +257,9 @@ def install_ltx():
 
     run(
         f"cd {LTX_REPO} && "
-        f"pip install -e . --no-deps"
+        f"{sys.executable} -m pip install -e . --no-deps"
     )
 
-    # Verify installation
     test = subprocess.run(
         [
             sys.executable,
@@ -286,8 +291,8 @@ def print_final_status():
     print(f"LTX upscaler   : {LTX_UPSCALER}")
     print(f"LTX repo       : {LTX_REPO}")
     print(f"LTX revision   : {LTX_COMMIT}")
+    print(f"LTX config     : {LTX_CONFIG}")
     print(f"Clips          : {CLIPS_DIR}")
-    print(f"Frames         : {FRAMES_DIR}")
     print(f"Output         : {OUTPUT_DIR}")
 
     print("\n🚀 LTX environment is ready.")
