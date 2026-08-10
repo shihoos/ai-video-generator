@@ -6,7 +6,7 @@ import inspect
 
 
 # ============================================================
-# AI VIDEO PROJECT - KAGGLE STARTUP
+# AI VIDEO PROJECT - KAGGLE START
 # ============================================================
 
 PROJECT_ROOT = Path(
@@ -15,8 +15,19 @@ PROJECT_ROOT = Path(
 
 KAGGLE_DIR = PROJECT_ROOT / "kaggle"
 
-# LTX repository inside the temporary Kaggle working directory.
+# LTX repository cloned into Kaggle working storage.
 LTX_REPO = PROJECT_ROOT / "LTX-Video-0.9.8"
+
+# ============================================================
+# QWEN STORY PLANNER
+# ============================================================
+
+# Qwen is stored permanently in the Kaggle Dataset.
+QWEN_MODEL_DIR = (
+    Path("/kaggle/input/datasets/shihoos")
+    / "ai-video-model"
+    / "qwen3-4b-instruct-2507"
+)
 
 
 # ============================================================
@@ -27,7 +38,6 @@ if str(KAGGLE_DIR) not in sys.path:
     sys.path.insert(0, str(KAGGLE_DIR))
 
 
-# Import project configuration.
 from config import (
     LTX_MODEL,
     LTX_UPSCALER,
@@ -45,8 +55,11 @@ from config import (
 # CONSTANTS
 # ============================================================
 
+EXPECTED_LTX_COMMIT = (
+    "bdc8f017f0148a0f0bb9e3a5049d2d356423cee0"
+)
+
 EXPECTED_TRANSFORMERS_MAJOR = "5"
-EXPECTED_LTX_COMMIT = "bdc8f017f0148a0f0bb9e3a5049d2d356423cee0"
 
 
 # ============================================================
@@ -54,21 +67,17 @@ EXPECTED_LTX_COMMIT = "bdc8f017f0148a0f0bb9e3a5049d2d356423cee0"
 # ============================================================
 
 def run(command, cwd=None):
-    """
-    Run a command safely.
-
-    command can be:
-        ["git", "status"]
-
-    or a string when shell execution is actually required.
-    """
+    """Run a command and stop if it fails."""
 
     if isinstance(command, (list, tuple)):
-        printable = " ".join(str(x) for x in command)
+        printable = " ".join(
+            str(x) for x in command
+        )
     else:
         printable = str(command)
 
-    print(f"\n$ {printable}")
+    print()
+    print("$ " + printable)
 
     result = subprocess.run(
         command,
@@ -77,10 +86,11 @@ def run(command, cwd=None):
     )
 
     if result.returncode != 0:
+        print()
         print(
-            f"\n❌ Command failed with exit code "
-            f"{result.returncode}"
+            f"❌ Command failed: {printable}"
         )
+
         sys.exit(result.returncode)
 
     return result
@@ -92,9 +102,10 @@ def run(command, cwd=None):
 
 def check_gpu():
 
-    print("\n" + "=" * 60)
+    print()
+    print("=" * 70)
     print("GPU CHECK")
-    print("=" * 60)
+    print("=" * 70)
 
     result = subprocess.run(
         [
@@ -116,9 +127,10 @@ def check_gpu():
 
 def check_python_environment():
 
-    print("\n" + "=" * 60)
+    print()
+    print("=" * 70)
     print("PYTHON ENVIRONMENT CHECK")
-    print("=" * 60)
+    print("=" * 70)
 
     packages = [
         "torch",
@@ -155,51 +167,49 @@ def check_python_environment():
             missing.append(package)
 
     # --------------------------------------------------------
-    # Only install AV if it is missing.
+    # Only install AV if missing.
     #
-    # DO NOT automatically upgrade/downgrade:
+    # NEVER automatically upgrade/downgrade:
     # torch
     # transformers
     # diffusers
     # huggingface_hub
     # --------------------------------------------------------
 
-    if missing:
+    for package in missing:
 
-        for package in missing:
+        if package == "av":
 
-            if package == "av":
+            print(
+                "\nInstalling missing dependency: av"
+            )
 
-                print(
-                    "\nInstalling missing dependency: av"
-                )
+            run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "av",
+                ]
+            )
 
-                run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "pip",
-                        "install",
-                        "av",
-                    ]
-                )
+        else:
 
-            else:
+            print(
+                f"\n❌ Required package missing: "
+                f"{package}"
+            )
 
-                print(
-                    f"\n❌ Required package missing: "
-                    f"{package}"
-                )
+            print(
+                "The startup script will not "
+                "modify the ML environment."
+            )
 
-                print(
-                    "This startup script will not "
-                    "automatically modify the ML environment."
-                )
-
-                sys.exit(1)
+            sys.exit(1)
 
     # --------------------------------------------------------
-    # Verify versions after optional AV installation.
+    # Import and verify versions
     # --------------------------------------------------------
 
     import torch
@@ -207,7 +217,8 @@ def check_python_environment():
     import huggingface_hub
     import diffusers
 
-    print("\n" + "-" * 60)
+    print()
+    print("-" * 70)
 
     print(
         "torch           :",
@@ -233,15 +244,17 @@ def check_python_environment():
     # CUDA
     # --------------------------------------------------------
 
-    print(
-        "\nCUDA available:",
-        torch.cuda.is_available(),
-    )
-
     if not torch.cuda.is_available():
 
-        print("❌ CUDA is not available.")
+        print(
+            "\n❌ CUDA is not available."
+        )
+
         sys.exit(1)
+
+    print(
+        "\n✅ CUDA available"
+    )
 
     print(
         "CUDA version:",
@@ -258,7 +271,7 @@ def check_python_environment():
         )
 
     # --------------------------------------------------------
-    # Modern Transformers requirement
+    # Transformers 5.x
     # --------------------------------------------------------
 
     if not transformers.__version__.startswith(
@@ -280,7 +293,7 @@ def check_python_environment():
         sys.exit(1)
 
     print(
-        "\n✅ Modern Transformers 5.x detected"
+        "\n✅ Transformers 5.x detected"
     )
 
     print(
@@ -300,142 +313,180 @@ def check_python_environment():
 
 def check_models():
 
-    print("\n" + "=" * 60)
+    print()
+    print("=" * 70)
     print("MODEL CHECK")
-    print("=" * 60)
+    print("=" * 70)
 
     # --------------------------------------------------------
-    # LTX 2B
+    # LTX MODEL
     # --------------------------------------------------------
 
-    if LTX_MODEL.exists():
+    if not LTX_MODEL.exists():
 
-        size_gb = (
-            LTX_MODEL.stat().st_size
-            / (1024 ** 3)
+        print(
+            "❌ LTX 2B model not found:"
         )
 
         print(
-            "✅ LTX 2B model found"
+            LTX_MODEL
+        )
+
+        sys.exit(1)
+
+    size_gb = (
+        LTX_MODEL.stat().st_size
+        / (1024 ** 3)
+    )
+
+    print(
+        "✅ LTX 2B model found"
+    )
+
+    print(
+        f"Path: {LTX_MODEL}"
+    )
+
+    print(
+        f"Size: {size_gb:.2f} GB"
+    )
+
+    # --------------------------------------------------------
+    # UPSCALER
+    # --------------------------------------------------------
+
+    if not LTX_UPSCALER.exists():
+
+        print(
+            "❌ LTX spatial upscaler not found:"
         )
 
         print(
-            f"Path: {LTX_MODEL}"
+            LTX_UPSCALER
+        )
+
+        sys.exit(1)
+
+    size_mb = (
+        LTX_UPSCALER.stat().st_size
+        / (1024 ** 2)
+    )
+
+    print(
+        "✅ LTX spatial upscaler found"
+    )
+
+    print(
+        f"Path: {LTX_UPSCALER}"
+    )
+
+    print(
+        f"Size: {size_mb:.0f} MB"
+    )
+
+    # --------------------------------------------------------
+    # QWEN
+    # --------------------------------------------------------
+
+    if QWEN_MODEL_DIR.is_dir():
+
+        print(
+            "\n✅ Qwen3 story planner found"
         )
 
         print(
-            f"Size: {size_gb:.2f} GB"
+            f"Path: {QWEN_MODEL_DIR}"
+        )
+
+        # Count model files
+        model_files = list(
+            QWEN_MODEL_DIR.glob(
+                "*.safetensors"
+            )
+        )
+
+        print(
+            f"Model weight files: "
+            f"{len(model_files)}"
         )
 
     else:
 
         print(
-            "❌ LTX 2B model not found"
+            "\n⚠️ Qwen3 local model not found:"
         )
 
         print(
-            f"Expected: {LTX_MODEL}"
-        )
-
-        sys.exit(1)
-
-    # --------------------------------------------------------
-    # Spatial upscaler
-    # --------------------------------------------------------
-
-    if LTX_UPSCALER.exists():
-
-        size_mb = (
-            LTX_UPSCALER.stat().st_size
-            / (1024 ** 2)
+            QWEN_MODEL_DIR
         )
 
         print(
-            "✅ LTX spatial upscaler found"
+            "The story planner will use "
+            "its configured fallback if available."
         )
-
-        print(
-            f"Path: {LTX_UPSCALER}"
-        )
-
-        print(
-            f"Size: {size_mb:.0f} MB"
-        )
-
-    else:
-
-        print(
-            "❌ LTX spatial upscaler not found"
-        )
-
-        print(
-            f"Expected: {LTX_UPSCALER}"
-        )
-
-        sys.exit(1)
 
 
 # ============================================================
-# SAFE DIRECTORY CREATION
+# SAFE DIRECTORY
 # ============================================================
 
-def ensure_directory(directory):
+def ensure_real_directory(path):
 
-    directory = Path(directory)
+    path = Path(path)
 
     # --------------------------------------------------------
-    # If a FILE exists where a directory should be,
-    # remove it.
-    #
-    # This permanently prevents errors such as:
-    #
-    # FileExistsError:
-    # work/output
-    #
+    # Existing directory
     # --------------------------------------------------------
 
-    if directory.exists() or directory.is_symlink():
+    if path.exists() and path.is_dir():
+        return path
 
-        if directory.is_dir() and not directory.is_symlink():
+    # --------------------------------------------------------
+    # Existing symlink
+    # --------------------------------------------------------
 
-            # Already a valid directory.
-            return
-
-        print(
-            f"⚠️ Invalid directory path detected:"
-        )
+    if path.is_symlink():
 
         print(
-            f"   {directory}"
+            f"⚠️ Removing invalid symlink: {path}"
         )
+
+        path.unlink()
+
+    # --------------------------------------------------------
+    # Existing file
+    # --------------------------------------------------------
+
+    elif path.exists():
 
         print(
-            "   Removing invalid file/symlink..."
+            f"⚠️ Removing invalid file: {path}"
         )
 
-        if directory.is_symlink() or directory.is_file():
+        path.unlink()
 
-            directory.unlink()
+    # --------------------------------------------------------
+    # Create directory
+    # --------------------------------------------------------
 
-        else:
-
-            shutil.rmtree(directory)
-
-    directory.mkdir(
+    path.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    return path
+
 
 # ============================================================
-# DIRECTORY CHECK
+# DIRECTORY SETUP
 # ============================================================
 
 def setup_directories():
 
-    print("\n" + "=" * 60)
+    print()
+    print("=" * 70)
     print("DIRECTORY CHECK")
-    print("=" * 60)
+    print("=" * 70)
 
     directories = [
         PROJECT_ROOT,
@@ -447,7 +498,9 @@ def setup_directories():
 
     for directory in directories:
 
-        ensure_directory(directory)
+        ensure_real_directory(
+            directory
+        )
 
         print(
             f"✅ {directory}"
@@ -464,12 +517,13 @@ def setup_directories():
 
 def setup_ltx_repository():
 
-    print("\n" + "=" * 60)
+    print()
+    print("=" * 70)
     print("LTX-VIDEO REPOSITORY CHECK")
-    print("=" * 60)
+    print("=" * 70)
 
     # --------------------------------------------------------
-    # Clone if necessary
+    # Clone repository if needed
     # --------------------------------------------------------
 
     if not LTX_REPO.exists():
@@ -494,7 +548,7 @@ def setup_ltx_repository():
     else:
 
         print(
-            f"✅ LTX repository exists:"
+            "✅ LTX repository exists:"
         )
 
         print(
@@ -502,10 +556,10 @@ def setup_ltx_repository():
         )
 
     # --------------------------------------------------------
-    # Verify it is actually a Git repository
+    # Verify Git repository
     # --------------------------------------------------------
 
-    git_check = subprocess.run(
+    result = subprocess.run(
         [
             "git",
             "-C",
@@ -517,17 +571,17 @@ def setup_ltx_repository():
         text=True,
     )
 
-    if git_check.returncode != 0:
+    if result.returncode != 0:
 
         print(
-            "❌ LTX directory exists but is not "
+            "❌ LTX directory is not "
             "a valid Git repository."
         )
 
         sys.exit(1)
 
     # --------------------------------------------------------
-    # Fetch required revision
+    # Fetch repository
     # --------------------------------------------------------
 
     run(
@@ -542,11 +596,11 @@ def setup_ltx_repository():
     )
 
     # --------------------------------------------------------
-    # Checkout exact tested LTX revision
+    # Checkout exact tested revision
     # --------------------------------------------------------
 
     print(
-        "\nSwitching to tested LTX revision:"
+        "\nChecking out tested LTX revision:"
     )
 
     print(
@@ -584,7 +638,7 @@ def setup_ltx_repository():
     current_commit = result.stdout.strip()
 
     print(
-        f"\nCurrent LTX commit:"
+        "\nLTX commit:"
     )
 
     print(
@@ -594,7 +648,7 @@ def setup_ltx_repository():
     if current_commit != EXPECTED_LTX_COMMIT:
 
         print(
-            "\n❌ LTX revision verification failed."
+            "\n❌ LTX revision mismatch."
         )
 
         print(
@@ -608,17 +662,17 @@ def setup_ltx_repository():
         sys.exit(1)
 
     print(
-        "\n✅ LTX-Video 0.9.8 revision confirmed"
+        "\n✅ LTX 0.9.8 revision confirmed"
     )
 
     # --------------------------------------------------------
-    # Verify configuration
+    # Configuration
     # --------------------------------------------------------
 
     if not LTX_CONFIG.exists():
 
         print(
-            "\n❌ Official LTX configuration not found:"
+            "\n❌ LTX configuration not found:"
         )
 
         print(
@@ -628,7 +682,7 @@ def setup_ltx_repository():
         sys.exit(1)
 
     print(
-        f"✅ LTX configuration found:"
+        "✅ LTX configuration found:"
     )
 
     print(
@@ -637,26 +691,17 @@ def setup_ltx_repository():
 
 
 # ============================================================
-# LTX SOURCE PATH
+# LTX SOURCE IMPORT
 # ============================================================
 
 def setup_ltx_source():
 
-    print("\n" + "=" * 60)
+    print()
+    print("=" * 70)
     print("LTX SOURCE IMPORT CHECK")
-    print("=" * 60)
+    print("=" * 70)
 
-    # --------------------------------------------------------
-    # Put repository directly on Python's import path.
-    #
-    # We intentionally do NOT use:
-    #
-    # pip install -e .
-    #
-    # This allows us to keep modern Transformers/HF versions
-    # without the old ltx-video package dependency metadata.
-    # --------------------------------------------------------
-
+    # Put LTX source FIRST on Python import path.
     if str(LTX_REPO) not in sys.path:
 
         sys.path.insert(
@@ -664,23 +709,20 @@ def setup_ltx_source():
             str(LTX_REPO),
         )
 
-    # --------------------------------------------------------
-    # Import directly from repository
-    # --------------------------------------------------------
-
     try:
 
         import ltx_video
 
-        ltx_file = Path(
-            inspect.getfile(ltx_video)
+        imported_path = Path(
+            inspect.getfile(
+                ltx_video
+            )
         ).resolve()
 
     except Exception as exc:
 
         print(
-            "\n❌ Failed to import LTX directly "
-            "from source."
+            "\n❌ Could not import LTX:"
         )
 
         print(
@@ -689,7 +731,7 @@ def setup_ltx_source():
 
         sys.exit(1)
 
-    expected_path = (
+    expected_root = (
         LTX_REPO / "ltx_video"
     ).resolve()
 
@@ -698,18 +740,18 @@ def setup_ltx_source():
     )
 
     print(
-        ltx_file
+        imported_path
     )
 
     # --------------------------------------------------------
-    # Make absolutely sure we didn't accidentally import
-    # an old pip installation.
+    # Make sure Python did NOT import a pip-installed
+    # version from site-packages.
     # --------------------------------------------------------
 
     try:
 
-        ltx_file.relative_to(
-            expected_path
+        imported_path.relative_to(
+            expected_root
         )
 
     except ValueError:
@@ -719,30 +761,19 @@ def setup_ltx_source():
         )
 
         print(
-            f"Expected under:"
+            f"Expected under:\n"
+            f"{expected_root}"
         )
 
         print(
-            expected_path
-        )
-
-        print(
-            f"Actually imported from:"
-        )
-
-        print(
-            ltx_file
+            f"Actually imported from:\n"
+            f"{imported_path}"
         )
 
         sys.exit(1)
 
     print(
-        "\n✅ LTX is being loaded directly "
-        "from the 0.9.8 repository"
-    )
-
-    print(
-        "✅ No LTX pip package is required"
+        "\n✅ LTX source import is correct"
     )
 
 
@@ -752,13 +783,10 @@ def setup_ltx_source():
 
 def remove_old_ltx_package():
 
-    print("\n" + "=" * 60)
-    print("LTX PIP PACKAGE CHECK")
-    print("=" * 60)
-
-    # --------------------------------------------------------
-    # Check whether the old pip package is installed.
-    # --------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("LTX PIP PACKAGE CLEANUP")
+    print("=" * 70)
 
     result = subprocess.run(
         [
@@ -782,12 +810,11 @@ def remove_old_ltx_package():
         return
 
     print(
-        "⚠️ Separate ltx-video pip package detected."
+        "⚠️ Old ltx-video pip package detected."
     )
 
     print(
-        "Removing it because this project uses "
-        "the checked-out LTX source directly."
+        "Removing it."
     )
 
     run(
@@ -805,28 +832,17 @@ def remove_old_ltx_package():
         "✅ Old ltx-video pip package removed"
     )
 
-    # --------------------------------------------------------
-    # Re-add LTX source because pip operations can affect
-    # Python's environment.
-    # --------------------------------------------------------
-
-    if str(LTX_REPO) not in sys.path:
-
-        sys.path.insert(
-            0,
-            str(LTX_REPO),
-        )
-
 
 # ============================================================
-# VERIFY LTX AFTER PACKAGE CLEANUP
+# FINAL LTX VERIFICATION
 # ============================================================
 
-def verify_ltx_after_cleanup():
+def verify_ltx():
 
-    print("\n" + "=" * 60)
+    print()
+    print("=" * 70)
     print("FINAL LTX VERIFICATION")
-    print("=" * 60)
+    print("=" * 70)
 
     if str(LTX_REPO) not in sys.path:
 
@@ -839,14 +855,16 @@ def verify_ltx_after_cleanup():
 
         import ltx_video
 
-        ltx_file = Path(
-            inspect.getfile(ltx_video)
+        imported_path = Path(
+            inspect.getfile(
+                ltx_video
+            )
         ).resolve()
 
     except Exception as exc:
 
         print(
-            "❌ LTX import failed after cleanup."
+            "❌ LTX import failed:"
         )
 
         print(
@@ -855,39 +873,105 @@ def verify_ltx_after_cleanup():
 
         sys.exit(1)
 
-    expected_path = (
+    expected_root = (
         LTX_REPO / "ltx_video"
     ).resolve()
 
+    print(
+        "LTX imported from:"
+    )
+
+    print(
+        imported_path
+    )
+
     try:
 
-        ltx_file.relative_to(
-            expected_path
+        imported_path.relative_to(
+            expected_root
         )
 
     except ValueError:
 
         print(
-            "❌ LTX is being imported from "
-            "the wrong location."
-        )
-
-        print(
-            f"Expected: {expected_path}"
-        )
-
-        print(
-            f"Found: {ltx_file}"
+            "\n❌ LTX is being imported "
+            "from the wrong location."
         )
 
         sys.exit(1)
 
     print(
-        "✅ LTX import successful"
+        "\n✅ LTX source verification passed"
+    )
+
+
+# ============================================================
+# QWEN VERIFICATION
+# ============================================================
+
+def verify_qwen():
+
+    print()
+    print("=" * 70)
+    print("QWEN3 STORY PLANNER CHECK")
+    print("=" * 70)
+
+    if not QWEN_MODEL_DIR.is_dir():
+
+        print(
+            "⚠️ Local Qwen3 model not found."
+        )
+
+        print(
+            QWEN_MODEL_DIR
+        )
+
+        print(
+            "Story planner fallback may be used."
+        )
+
+        return
+
+    required_files = [
+        "config.json",
+        "tokenizer_config.json",
+    ]
+
+    missing = []
+
+    for filename in required_files:
+
+        path = (
+            QWEN_MODEL_DIR
+            / filename
+        )
+
+        if not path.exists():
+
+            missing.append(
+                filename
+            )
+
+    if missing:
+
+        print(
+            "❌ Qwen3 directory exists but "
+            "required files are missing:"
+        )
+
+        for filename in missing:
+            print(
+                f"  - {filename}"
+            )
+
+        sys.exit(1)
+
+    print(
+        "✅ Qwen3 local model ready"
     )
 
     print(
-        f"Source: {ltx_file}"
+        f"Path: {QWEN_MODEL_DIR}"
     )
 
 
@@ -897,9 +981,10 @@ def verify_ltx_after_cleanup():
 
 def print_final_status():
 
-    print("\n" + "=" * 60)
-    print("✅ STARTUP CHECK COMPLETE")
-    print("=" * 60)
+    print()
+    print("=" * 70)
+    print("✅ START CHECK COMPLETE")
+    print("=" * 70)
 
     print(
         f"LTX model      : {LTX_MODEL}"
@@ -910,7 +995,7 @@ def print_final_status():
     )
 
     print(
-        f"LTX repo       : {LTX_REPO}"
+        f"LTX repository  : {LTX_REPO}"
     )
 
     print(
@@ -919,6 +1004,10 @@ def print_final_status():
 
     print(
         f"LTX config     : {LTX_CONFIG}"
+    )
+
+    print(
+        f"Qwen3 model    : {QWEN_MODEL_DIR}"
     )
 
     print(
@@ -934,35 +1023,10 @@ def print_final_status():
     )
 
     print(
-        "\nModern environment:"
+        "\n🚀 AI video environment is ready."
     )
 
-    import torch
-    import transformers
-    import huggingface_hub
-    import diffusers
-
-    print(
-        f"  torch           : {torch.__version__}"
-    )
-
-    print(
-        f"  transformers    : {transformers.__version__}"
-    )
-
-    print(
-        f"  huggingface_hub : {huggingface_hub.__version__}"
-    )
-
-    print(
-        f"  diffusers       : {diffusers.__version__}"
-    )
-
-    print(
-        "\n🚀 LTX environment is ready."
-    )
-
-    print("=" * 60)
+    print("=" * 70)
 
 
 # ============================================================
@@ -971,11 +1035,10 @@ def print_final_status():
 
 def main():
 
-    print("\n")
-
-    print("=" * 60)
-    print("🚀 AI VIDEO PROJECT STARTUP")
-    print("=" * 60)
+    print()
+    print("=" * 70)
+    print("🚀 AI VIDEO PROJECT START")
+    print("=" * 70)
 
     # 1. GPU
     check_gpu()
@@ -986,16 +1049,17 @@ def main():
     # 3. Models
     check_models()
 
-    # 4. Working directories
+    # 4. Directories
     setup_directories()
 
     # 5. LTX repository
     setup_ltx_repository()
 
-    # 6. Apply T4 compatibility patch
-    print("\n" + "=" * 60)
+    # 6. T4 patch
+    print()
+    print("=" * 70)
     print("APPLYING LTX T4 PATCH")
-    print("=" * 60)
+    print("=" * 70)
 
     run(
         [
@@ -1007,16 +1071,19 @@ def main():
         ]
     )
 
-    # 7. Direct LTX source path
+    # 7. Direct LTX source import
     setup_ltx_source()
 
-    # 8. Remove obsolete pip-installed LTX package
+    # 8. Remove obsolete pip package
     remove_old_ltx_package()
 
-    # 9. Verify direct source import again
-    verify_ltx_after_cleanup()
+    # 9. Verify LTX again
+    verify_ltx()
 
-    # 10. Final status
+    # 10. Qwen3
+    verify_qwen()
+
+    # 11. Final status
     print_final_status()
 
 
