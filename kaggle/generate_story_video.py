@@ -129,7 +129,37 @@ def run_command(command):
             f"Command failed with exit code "
             f"{result.returncode}"
         )
+        
+def ensure_real_directory(path):
+    """
+    Ensure that path exists as a real directory.
 
+    If a file, broken symlink, or other filesystem entry
+    occupies the expected directory path, remove it and
+    recreate the directory.
+
+    This prevents FileExistsError from Path.mkdir().
+    """
+
+    path = Path(path)
+
+    if path.is_symlink():
+        print(f"⚠️ Removing invalid symlink: {path}")
+        path.unlink()
+
+    elif path.exists() and not path.is_dir():
+        print(f"⚠️ Removing invalid file path: {path}")
+        path.unlink()
+
+    elif path.exists() and path.is_dir():
+        return path
+
+    path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    return path
 
 def clean_name(value):
 
@@ -859,7 +889,10 @@ def create_concat_file(videos):
 # ============================================================
 
 def assemble(videos):
-
+    
+    ensure_real_directory(
+    OUTPUT_DIR
+    )
     concat = create_concat_file(
         videos
     )
@@ -990,41 +1023,47 @@ def main():
 
     args = parser.parse_args()
 
-    # --------------------------------------------------------
-    # Requirements
-    # --------------------------------------------------------
+# --------------------------------------------------------
+# Ensure project directories
+# --------------------------------------------------------
 
-    if not GENERATE_SCRIPT.exists():
-
-        raise FileNotFoundError(
-            f"generate.py not found:\n"
-            f"{GENERATE_SCRIPT}"
-        )
-
-    if shutil.which("ffmpeg") is None:
-
-        raise RuntimeError(
-            "FFmpeg is unavailable."
-        )
-
-    CHARACTER_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+    ensure_real_directory(
+        CHARACTER_DIR
+    )
+    
+    ensure_real_directory(
+        REFERENCE_DIR
+    )
+    
+    ensure_real_directory(
+        OUTPUT_DIR
     )
 
-    REFERENCE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+# --------------------------------------------------------
+# Temporary story clips
+# --------------------------------------------------------
 
-    CLIPS_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+    if (
+        CLEAN_TEMPORARY_CLIPS
+        and not args.keep_clips
+    ):
+        if CLIPS_DIR.exists() or CLIPS_DIR.is_symlink():
+    
+            print(
+                f"🧹 Cleaning temporary clips: {CLIPS_DIR}"
+            )
+    
+            if CLIPS_DIR.is_symlink():
+                CLIPS_DIR.unlink()
+    
+            elif CLIPS_DIR.is_dir():
+                shutil.rmtree(CLIPS_DIR)
+    
+            else:
+                CLIPS_DIR.unlink()
+    
+    ensure_real_directory(
+        CLIPS_DIR
     )
 
     # --------------------------------------------------------
@@ -1112,24 +1151,6 @@ def main():
         plan
     )
 
-    # --------------------------------------------------------
-    # Clean clips
-    # --------------------------------------------------------
-
-    if (
-        CLEAN_TEMPORARY_CLIPS
-        and not args.keep_clips
-        and CLIPS_DIR.exists()
-    ):
-
-        shutil.rmtree(
-            CLIPS_DIR
-        )
-
-        CLIPS_DIR.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
 
     # --------------------------------------------------------
     # Generate shots
