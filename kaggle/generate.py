@@ -222,6 +222,10 @@ def main():
         num_frames=args.frames,
         frame_rate=args.fps,
         offload_to_cpu=args.offload,
+    
+        conditioning_media_paths=args.conditioning_media,
+        conditioning_start_frames=args.conditioning_start_frames,
+        conditioning_strengths=args.conditioning_strengths,
     )
 
     print("\n" + "=" * 60)
