@@ -313,6 +313,11 @@ def main():
     check_python_environment()
     check_models()
     setup_directories()
+    # Apply our T4 memory compatibility patch before inference.
+    run(
+    f"{sys.executable} {KAGGLE_DIR / 'apply_ltx_t4_patch.py'}"
+    )
+    
     setup_ltx_repository()
     install_ltx()
     print_final_status()
