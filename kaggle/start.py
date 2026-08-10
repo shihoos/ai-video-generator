@@ -118,6 +118,28 @@ def install_ltx():
         f"pip install -e . --no-deps"
     )
 
+def check_python_environment():
+    print("\n" + "=" * 60)
+    print("PYTHON ENVIRONMENT CHECK")
+    print("=" * 60)
+
+    packages = [
+        "torch",
+        "transformers",
+        "diffusers",
+        "huggingface_hub",
+    ]
+
+    for package in packages:
+        try:
+            module = __import__(package)
+
+            version = getattr(module, "__version__", "unknown")
+
+            print(f"✅ {package}: {version}")
+
+        except ImportError:
+            print(f"❌ {package}: NOT INSTALLED")
 
 def main():
     print("\n")
