@@ -234,25 +234,66 @@ def patch_pipeline():
         )
 
     # ========================================================
-    # FIX 2: Explicit execution device
+    # FIX 2: ACTUALLY FORCE THE LTX GENERATION DEVICE
     #
-    # The Diffusers pipeline may report CPU because components
-    # are deliberately offloaded. LTX generation itself must
-    # use CUDA when available.
+    # IMPORTANT:
+    # The previous version only recorded an execution device on
+    # the pipeline object. That is NOT sufficient because LTX
+    # __call__ obtains its local `device` from Diffusers'
+    # `_execution_device`, which becomes CPU when components are
+    # offloaded.
     #
-    # We set the execution device once at the start of __call__
-    # rather than globally changing torch/device behavior.
+    # That produced:
+    #
+    #   device    = CPU
+    #   generator = CUDA
+    #
+    # and failed inside diffusers.randn_tensor().
+    #
+    # We therefore patch the local execution-device assignment
+    # so every generation operation in this pipeline uses the
+    # explicitly selected LTX execution device.
     # ========================================================
 
-    execution_marker = """    def __call__(
+    old_execution_device = """        device = self._execution_device
 """
 
-    # We do not inject a second device variable if the pipeline
-    # already receives the execution device from inference.py.
-    #
-    # Instead, make sure all downstream generation uses the
-    # explicit `device` variable already supplied by __call__.
-    print("✅ Using explicit LTX execution device supplied by inference.py")
+    new_execution_device = """        # LTX T4 execution-device fix:
+        # Diffusers may report CPU because components are
+        # offloaded. The actual LTX generation tensors must use
+        # the explicit execution device selected by inference.py.
+        device = getattr(
+            self,
+            "_ltx_execution_device",
+            self._execution_device,
+        )
+"""
+
+    execution_device_occurrences = text.count(old_execution_device)
+
+    if new_execution_device in text:
+        print("✅ LTX execution device patch already present")
+
+    elif execution_device_occurrences == 0:
+        raise RuntimeError(
+            "Could not find `device = self._execution_device` in "
+            "pipeline_ltx_video.py. Cannot safely patch generation device."
+        )
+
+    elif execution_device_occurrences > 1:
+        raise RuntimeError(
+            "Found multiple `device = self._execution_device` assignments "
+            "in pipeline_ltx_video.py. Refusing an ambiguous automatic patch."
+        )
+
+    else:
+        text = replace_once(
+            text,
+            old_execution_device,
+            new_execution_device,
+            "force LTX generation device instead of Diffusers offload device",
+        )
+        print("✅ LTX generation device now uses explicit execution device")
 
     # ========================================================
     # FIX 3: Attention masks
@@ -391,14 +432,14 @@ def patch_pipeline():
     # ========================================================
 
     prepare_latents_pattern = re.compile(
-        r"self\.prepare_latents\([\s\S]{0,2500}?"
-        r"device=device,[\s\S]{0,2500}?"
+        r"self\.prepare_latents\([\s\S]{0,3000}?"
+        r"device=device,[\s\S]{0,3000}?"
         r"generator=generator,",
         re.MULTILINE,
     )
 
     if prepare_latents_pattern.search(text):
-        print("✅ prepare_latents uses explicit execution device")
+        print("✅ prepare_latents uses the local execution device")
         print("✅ prepare_latents uses the generation generator")
     else:
         raise RuntimeError(
@@ -488,6 +529,26 @@ def verify_patch():
         (
             "Explicit LTX execution device configured",
             execution_device_check,
+        )
+    )
+
+    # ========================================================
+    # Actual execution-device assignment.
+    # ========================================================
+
+    execution_device_patch_check = (
+        "device = getattr("
+        in pipeline
+        and "_ltx_execution_device"
+        in pipeline
+        and "self._execution_device"
+        in pipeline
+    )
+
+    checks.append(
+        (
+            "LTX generation device overrides Diffusers CPU offload device",
+            execution_device_patch_check,
         )
     )
 
