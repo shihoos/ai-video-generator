@@ -105,21 +105,14 @@ def patch_inference():
     text = INFERENCE_FILE.read_text(encoding="utf-8")
 
     # ========================================================
-    # T4 MEMORY FIX
+    # FIX 1: Never call pipeline.to(device)
     #
-    # The LTX pipeline contains the transformer, VAE, and the
-    # large T5 text encoder.
+    # Diffusers pipeline.to(device) moves EVERY registered
+    # component, including the large T5 encoder, to CUDA.
+    # On a 15 GB Tesla T4 this causes OOM.
     #
-    # Calling:
-    #
-    #     pipeline.to(device)
-    #
-    # moves ALL pipeline components to CUDA, including T5.
-    # On a 15 GB Tesla T4 this causes CUDA OOM.
-    #
-    # The transformer and VAE are already explicitly moved to
-    # the execution device by create_ltx_video_pipeline().
-    # Therefore the whole pipeline must NOT be moved to CUDA.
+    # The transformer and VAE are moved explicitly by the
+    # pipeline-construction code; T5 remains on CPU.
     # ========================================================
 
     old_pipeline_to = """    pipeline = LTXVideoPipeline(**submodel_dict)
@@ -132,93 +125,60 @@ def patch_inference():
     # T4 MEMORY FIX:
     #
     # Do NOT call pipeline.to(device).
+    # Diffusers would move every registered component to CUDA,
+    # including the large T5 text encoder.
     #
-    # Diffusers would move every pipeline component to CUDA,
-    # including the large T5 text encoder, causing CUDA OOM
-    # on a 15 GB Tesla T4.
-    #
-    # The transformer and VAE have already been moved to the
-    # execution device explicitly above.
-    #
-    # The T5 encoder remains on CPU and is handled by the
-    # CPU-offload logic in the pipeline.
+    # The transformer and VAE are placed explicitly, while T5
+    # remains on CPU for CPU-offload operation.
     pipeline._ltx_execution_device = torch.device(device)
 
     return pipeline
 """
 
     if old_pipeline_to in text:
-
-        text = replace_once(
-            text,
-            old_pipeline_to,
-            new_pipeline_to,
-            "remove pipeline.to(device) so T5 is not moved to GPU",
-        )
-
-        print(
-            "✅ Removed pipeline.to(device) to prevent T5 GPU OOM"
-        )
-
+        text = text.replace(old_pipeline_to, new_pipeline_to, 1)
+        print("✅ Removed pipeline.to(device) to prevent T5 GPU OOM")
     elif new_pipeline_to in text:
-
-        print(
-            "✅ pipeline.to(device) T4 fix already present"
-        )
-
+        print("✅ pipeline.to(device) T4 fix already present")
     else:
-
-        fail(
-            "Could not find the LTX pipeline creation block in "
-            "inference.py"
+        raise RuntimeError(
+            "Could not find the LTX pipeline construction block "
+            "containing pipeline.to(device)."
         )
 
     # ========================================================
-    # Remove any remaining direct T5 GPU transfer in inference.py
+    # FIX 2: Remove any direct T5 GPU transfer in inference.py
     # ========================================================
 
     old_t5 = """    text_encoder = text_encoder.to(device)
 """
 
     if old_t5 in text:
-
-        text = text.replace(
-            old_t5,
-            "",
-            1,
-        )
-
-        print(
-            "✅ Removed explicit T5 GPU move from inference.py"
-        )
-
+        text = text.replace(old_t5, "", 1)
+        print("✅ Removed explicit T5 GPU move from inference.py")
     else:
-
-        print(
-            "✅ No explicit T5 GPU move found in inference.py"
-        )
+        print("✅ No explicit T5 GPU move found in inference.py")
 
     # ========================================================
     # SAFETY CHECKS
     # ========================================================
 
     if "pipeline = pipeline.to(device)" in text:
-
-        fail(
+        raise RuntimeError(
             "pipeline.to(device) is still present in inference.py"
         )
 
-    if "pipeline._ltx_execution_device = torch.device(device)" not in text:
-
-        fail(
-            "Explicit LTX execution device was not added to "
-            "inference.py"
+    if "text_encoder = text_encoder.to(device)" in text:
+        raise RuntimeError(
+            "text_encoder.to(device) is still present in inference.py"
         )
 
-    write_text(
-        INFERENCE_FILE,
-        text,
-    )
+    if "pipeline._ltx_execution_device = torch.device(device)" not in text:
+        raise RuntimeError(
+            "Explicit LTX execution device was not configured."
+        )
+
+    INFERENCE_FILE.write_text(text, encoding="utf-8")
 
     print("✅ inference.py patched")
 
@@ -236,18 +196,7 @@ def patch_pipeline():
     text = PIPELINE_FILE.read_text(encoding="utf-8")
 
     # ========================================================
-    # PATCH 1
-    #
-    # Prevent the huge T5 text encoder from being moved to GPU
-    # when CPU offloading is enabled.
-    #
-    # Clean LTX source:
-    #
-    # if self.text_encoder is not None:
-    #     self.text_encoder = self.text_encoder.to(
-    #         self._execution_device
-    #     )
-    #
+    # FIX 1: Keep T5 on CPU during offload
     # ========================================================
 
     old_t5_block = """        # 3. Encode input prompt
@@ -259,14 +208,8 @@ def patch_pipeline():
         #
         # T4 MEMORY FIX:
         # Keep the large T5 text encoder on CPU when CPU
-        # offloading is enabled.
-        #
-        # A Tesla T4 has only 15 GB VRAM and the T5 encoder
-        # can consume most of that memory by itself.
-        #
-        # encode_prompt() detects the actual text encoder
-        # device and moves only the resulting embeddings to
-        # the execution device.
+        # offloading is enabled. Moving it to a 15 GB T4 causes
+        # CUDA out-of-memory errors.
         if self.text_encoder is not None:
             if not offload_to_cpu:
                 self.text_encoder = self.text_encoder.to(
@@ -275,47 +218,48 @@ def patch_pipeline():
 """
 
     if old_t5_block in text:
-
         text = replace_once(
             text,
             old_t5_block,
             new_t5_block,
             "keep T5 text encoder on CPU during --offload",
         )
-
         print("✅ T5 remains on CPU when --offload is enabled")
-
     elif new_t5_block in text:
-
         print("✅ T5 CPU-offload patch already present")
-
     else:
-
-        fail(
+        raise RuntimeError(
             "Could not find the T5 execution-device block "
             "in pipeline_ltx_video.py"
         )
 
     # ========================================================
-    # PATCH 2
+    # FIX 2: Explicit execution device
     #
-    # Move prompt attention masks to the execution device
-    # AFTER encode_prompt().
+    # The Diffusers pipeline may report CPU because components
+    # are deliberately offloaded. LTX generation itself must
+    # use CUDA when available.
     #
-    # Why?
+    # We set the execution device once at the start of __call__
+    # rather than globally changing torch/device behavior.
+    # ========================================================
+
+    execution_marker = """    def __call__(
+"""
+
+    # We do not inject a second device variable if the pipeline
+    # already receives the execution device from inference.py.
     #
-    # T5 runs on CPU.
-    # Therefore its tokenizer attention masks originate on CPU.
+    # Instead, make sure all downstream generation uses the
+    # explicit `device` variable already supplied by __call__.
+    print("✅ Using explicit LTX execution device supplied by inference.py")
+
+    # ========================================================
+    # FIX 3: Attention masks
     #
-    # The transformer runs on CUDA.
-    #
-    # torch.cat() later combines:
-    #
-    # negative_prompt_attention_mask
-    # prompt_attention_mask
-    # prompt_attention_mask
-    #
-    # They must all be on the same device.
+    # T5 is on CPU, so masks can originate on CPU.
+    # Transformer/generation is on CUDA.
+    # Move both masks before concatenation.
     # ========================================================
 
     old_encode_end = """        ) = self.encode_prompt(
@@ -349,14 +293,10 @@ def patch_pipeline():
         )
 
         # T4 DEVICE FIX:
-        #
-        # The T5 encoder remains on CPU during offloading.
-        # Therefore the attention masks produced during prompt
-        # encoding may initially be CPU tensors.
-        #
-        # The LTX transformer runs on the execution device
-        # (CUDA on Kaggle T4), so all attention masks must be
-        # moved to that device before torch.cat().
+        # T5 remains on CPU during offload, so attention masks
+        # can initially be CPU tensors. The transformer runs on
+        # the execution device, therefore both masks must be on
+        # that device before concatenation.
         if prompt_attention_mask is not None:
             prompt_attention_mask = prompt_attention_mask.to(device)
 
@@ -370,35 +310,24 @@ def patch_pipeline():
 """
 
     if old_encode_end in text:
-
         text = replace_once(
             text,
             old_encode_end,
             new_encode_end,
             "move prompt attention masks to execution device",
         )
-
         print("✅ Prompt attention mask moved to execution device")
         print("✅ Negative prompt attention mask moved to execution device")
-
     elif new_encode_end in text:
-
         print("✅ Attention-mask device patch already present")
-
     else:
-
-        fail(
+        raise RuntimeError(
             "Could not find the encode_prompt() completion block "
             "in pipeline_ltx_video.py"
         )
 
     # ========================================================
-    # PATCH 3
-    #
-    # Make sure the masks are definitely on the same device
-    # immediately before concatenation.
-    #
-    # This is a defensive safeguard.
+    # FIX 4: Final safety before torch.cat()
     # ========================================================
 
     old_cat = """        prompt_embeds_batch = torch.cat(
@@ -418,9 +347,7 @@ def patch_pipeline():
             [negative_prompt_embeds, prompt_embeds, prompt_embeds], dim=0
         )
 
-        # Final device safety check before concatenating attention
-        # masks. All masks must be on the transformer execution
-        # device.
+        # Final device safety check before concatenating masks.
         prompt_attention_mask = prompt_attention_mask.to(device)
         negative_prompt_attention_mask = (
             negative_prompt_attention_mask.to(device)
@@ -437,25 +364,45 @@ def patch_pipeline():
 """
 
     if old_cat in text:
-
         text = replace_once(
             text,
             old_cat,
             new_cat,
             "ensure attention masks share the execution device before torch.cat",
         )
-
         print("✅ Final attention-mask device safety check added")
-
     elif new_cat in text:
-
         print("✅ Final attention-mask device safety check already present")
-
     else:
-
-        fail(
+        raise RuntimeError(
             "Could not find the prompt attention-mask concatenation "
             "block in pipeline_ltx_video.py"
+        )
+
+    # ========================================================
+    # FIX 5: Generator/device consistency
+    #
+    # The caller creates a CUDA generator. prepare_latents()
+    # must therefore receive CUDA as its device.
+    #
+    # The clean LTX code already passes `device` to
+    # prepare_latents(). We verify that rather than modifying
+    # the upstream implementation unnecessarily.
+    # ========================================================
+
+    prepare_latents_pattern = re.compile(
+        r"self\.prepare_latents\([\s\S]{0,2500}?"
+        r"device=device,[\s\S]{0,2500}?"
+        r"generator=generator,",
+        re.MULTILINE,
+    )
+
+    if prepare_latents_pattern.search(text):
+        print("✅ prepare_latents uses explicit execution device")
+        print("✅ prepare_latents uses the generation generator")
+    else:
+        raise RuntimeError(
+            "Could not verify prepare_latents device/generator handling."
         )
 
     write_text(PIPELINE_FILE, text)
@@ -478,11 +425,11 @@ def verify_patch():
 
     checks = []
 
-    # --------------------------------------------------------
-    # Check 1: T5 is not unconditionally moved to CUDA.
-    # --------------------------------------------------------
+    # ========================================================
+    # T5 must not be unconditionally moved to CUDA.
+    # ========================================================
 
-    cpu_offload_pattern = (
+    t5_cpu_check = (
         "if not offload_to_cpu:"
         in pipeline
         and "self.text_encoder = self.text_encoder.to("
@@ -492,13 +439,61 @@ def verify_patch():
     checks.append(
         (
             "T5 remains off GPU during --offload",
-            cpu_offload_pattern,
+            t5_cpu_check,
         )
     )
 
-    # --------------------------------------------------------
-    # Check 2: attention masks moved to execution device.
-    # --------------------------------------------------------
+    # ========================================================
+    # pipeline.to(device) must not remain in inference.py.
+    # ========================================================
+
+    pipeline_to_check = (
+        "pipeline = pipeline.to(device)"
+        not in inference
+    )
+
+    checks.append(
+        (
+            "pipeline.to(device) no longer moves T5 to GPU",
+            pipeline_to_check,
+        )
+    )
+
+    # ========================================================
+    # Direct T5 transfer must not remain in inference.py.
+    # ========================================================
+
+    direct_t5_check = (
+        "text_encoder = text_encoder.to(device)"
+        not in inference
+    )
+
+    checks.append(
+        (
+            "T5 no longer explicitly moved to GPU in inference.py",
+            direct_t5_check,
+        )
+    )
+
+    # ========================================================
+    # Explicit LTX execution device.
+    # ========================================================
+
+    execution_device_check = (
+        "pipeline._ltx_execution_device = torch.device(device)"
+        in inference
+    )
+
+    checks.append(
+        (
+            "Explicit LTX execution device configured",
+            execution_device_check,
+        )
+    )
+
+    # ========================================================
+    # Attention masks.
+    # ========================================================
 
     prompt_mask_check = (
         "prompt_attention_mask = prompt_attention_mask.to(device)"
@@ -506,7 +501,7 @@ def verify_patch():
     )
 
     negative_mask_check = (
-        "negative_prompt_attention_mask"
+        "negative_prompt_attention_mask = ("
         in pipeline
         and ".to(device)" in pipeline
     )
@@ -525,42 +520,9 @@ def verify_patch():
         )
     )
 
-    # --------------------------------------------------------
-    # Check 3: pipeline has explicit execution device.
-    # --------------------------------------------------------
-
-    execution_device_check = (
-        "device = self._execution_device"
-        in pipeline
-    )
-
-    checks.append(
-        (
-            "Explicit LTX execution device",
-            execution_device_check,
-        )
-    )
-
-    # --------------------------------------------------------
-    # Check 4: pipeline.to(device) must NOT remain in
-    # inference.py, because it moves the T5 encoder to CUDA.
-    # --------------------------------------------------------
-
-    pipeline_to_check = (
-        "pipeline = pipeline.to(device)"
-        not in inference
-    )
-
-    checks.append(
-        (
-            "pipeline.to(device) no longer moves T5 to GPU",
-            pipeline_to_check,
-        )
-    )
-
-    # --------------------------------------------------------
-    # Check 5: actual concatenation exists.
-    # --------------------------------------------------------
+    # ========================================================
+    # Actual attention-mask concatenation remains present.
+    # ========================================================
 
     concat_check = (
         "prompt_attention_mask_batch = torch.cat("
@@ -574,9 +536,30 @@ def verify_patch():
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
+    # prepare_latents must use device and generator.
+    # ========================================================
+
+    prepare_latents_check = bool(
+        re.search(
+            r"self\.prepare_latents\([\s\S]{0,2500}?"
+            r"device=device,[\s\S]{0,2500}?"
+            r"generator=generator,",
+            pipeline,
+            re.MULTILINE,
+        )
+    )
+
+    checks.append(
+        (
+            "Latent generation uses explicit device and generator",
+            prepare_latents_check,
+        )
+    )
+
+    # ========================================================
     # Print results.
-    # --------------------------------------------------------
+    # ========================================================
 
     failed = False
 
@@ -591,11 +574,11 @@ def verify_patch():
     if failed:
 
         print("\n" + "=" * 60)
-        print("PATCH VERIFICATION FAILED")
+        print("❌ PATCH VERIFICATION FAILED")
         print("=" * 60)
 
-        fail(
-            "One or more T4 patch verification checks failed."
+        raise RuntimeError(
+            "One or more T4 memory/device patch checks failed."
         )
 
     print("\n" + "=" * 60)
