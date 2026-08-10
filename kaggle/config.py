@@ -15,6 +15,9 @@ DATASET_ROOT = Path(
 # LTX model
 LTX_MODEL = DATASET_ROOT / "ltxv-2b-0.9.8-distilled.safetensors"
 
+# LTX spatial upscaler
+LTX_UPSCALER = DATASET_ROOT / "ltxv-spatial-upscaler-0.9.8.safetensors"
+
 # LTX repository
 LTX_REPO = PROJECT_ROOT / "LTX-Video-0.9.8"
 
