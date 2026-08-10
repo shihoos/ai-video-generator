@@ -191,7 +191,8 @@ QWEN_MODEL_ID = (
 
 QWEN_LOCAL_MODEL = (
     Path("/kaggle/input/datasets/shihoos")
-    / "ai-video-model" 
+    / "ai-video-model"
+    / "qwen3-4b-instruct-2507"
 )
 
 
