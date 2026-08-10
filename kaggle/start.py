@@ -84,14 +84,21 @@ def clone_ltx():
         return
 
     print("LTX-Video repository not found.")
-    print("Cloning LTX-Video 0.9.8...")
+    print("Cloning the exact tested 0.9.8 revision...")
 
     run(
-        f"git clone --branch v0.9.8 "
+        f"git clone "
         f"https://github.com/Lightricks/LTX-Video.git "
         f"{LTX_REPO}"
     )
 
+    run(
+        f"cd {LTX_REPO} && "
+        f"git checkout bdc8f01"
+    )
+
+    print("✅ LTX-Video 0.9.8 revision selected")
+    
 
 def install_ltx():
     print("\n" + "=" * 60)
