@@ -67,7 +67,7 @@ from video_config import (
 # STORY PLANNER MODEL
 # ============================================================
 
-PLANNER_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+PLANNER_MODEL = "Qwen/Qwen2.5-3B-Instruct"
 
 PLANNER_MAX_NEW_TOKENS = 2500
 
