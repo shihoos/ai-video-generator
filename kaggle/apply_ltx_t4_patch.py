@@ -104,81 +104,123 @@ def patch_inference():
 
     text = INFERENCE_FILE.read_text(encoding="utf-8")
 
-    changed = False
-
-    # --------------------------------------------------------
-    # Patch 1:
-    # Explicitly pass execution device to pipeline creation.
+    # ========================================================
+    # T4 MEMORY FIX
     #
-    # This is intentionally conservative. If the clean source
-    # already has the correct behavior, we leave it alone.
-    # --------------------------------------------------------
+    # The LTX pipeline contains the transformer, VAE, and the
+    # large T5 text encoder.
+    #
+    # Calling:
+    #
+    #     pipeline.to(device)
+    #
+    # moves ALL pipeline components to CUDA, including T5.
+    # On a 15 GB Tesla T4 this causes CUDA OOM.
+    #
+    # The transformer and VAE are already explicitly moved to
+    # the execution device by create_ltx_video_pipeline().
+    # Therefore the whole pipeline must NOT be moved to CUDA.
+    # ========================================================
 
-    old = """pipeline = create_ltx_video_pipeline(
-        ckpt_path=ltxv_model_path,
-        precision=precision,
-        text_encoder_model_name_or_path=text_encoder_model_name_or_path,
-        sampler=sampler,
-        device=device,"""
+    old_pipeline_to = """    pipeline = LTXVideoPipeline(**submodel_dict)
+    pipeline = pipeline.to(device)
+    return pipeline
+"""
 
-    new = """pipeline = create_ltx_video_pipeline(
-        ckpt_path=ltxv_model_path,
-        precision=precision,
-        text_encoder_model_name_or_path=text_encoder_model_name_or_path,
-        sampler=sampler,
-        device=device,"""
+    new_pipeline_to = """    pipeline = LTXVideoPipeline(**submodel_dict)
 
-    if old in text:
-        # Already correct in this revision.
-        print("✅ Explicit LTX execution device already present")
-    else:
-        # Check whether the pipeline call exists but has a
-        # different formatting.
-        pattern = re.compile(
-            r"pipeline\s*=\s*create_ltx_video_pipeline\(\s*"
-            r"ckpt_path=ltxv_model_path,\s*"
-            r"precision=precision,\s*"
-            r"text_encoder_model_name_or_path="
-            r"text_encoder_model_name_or_path,\s*"
-            r"sampler=sampler,\s*"
-            r"device=device,",
-            re.MULTILINE,
+    # T4 MEMORY FIX:
+    #
+    # Do NOT call pipeline.to(device).
+    #
+    # Diffusers would move every pipeline component to CUDA,
+    # including the large T5 text encoder, causing CUDA OOM
+    # on a 15 GB Tesla T4.
+    #
+    # The transformer and VAE have already been moved to the
+    # execution device explicitly above.
+    #
+    # The T5 encoder remains on CPU and is handled by the
+    # CPU-offload logic in the pipeline.
+    pipeline._ltx_execution_device = torch.device(device)
+
+    return pipeline
+"""
+
+    if old_pipeline_to in text:
+
+        text = replace_once(
+            text,
+            old_pipeline_to,
+            new_pipeline_to,
+            "remove pipeline.to(device) so T5 is not moved to GPU",
         )
 
-        if pattern.search(text):
-            print("✅ Explicit LTX execution device already present")
-        else:
-            print(
-                "ℹ️ Explicit device pattern not changed in inference.py"
-            )
+        print(
+            "✅ Removed pipeline.to(device) to prevent T5 GPU OOM"
+        )
 
-    # --------------------------------------------------------
-    # Patch 2:
-    # Do NOT explicitly move T5 to CUDA here.
-    #
-    # The current architecture keeps the large T5 model on CPU
-    # when offloading is enabled. The pipeline itself handles
-    # prompt encoding.
-    # --------------------------------------------------------
+    elif new_pipeline_to in text:
+
+        print(
+            "✅ pipeline.to(device) T4 fix already present"
+        )
+
+    else:
+
+        fail(
+            "Could not find the LTX pipeline creation block in "
+            "inference.py"
+        )
+
+    # ========================================================
+    # Remove any remaining direct T5 GPU transfer in inference.py
+    # ========================================================
 
     old_t5 = """    text_encoder = text_encoder.to(device)
 """
 
     if old_t5 in text:
+
         text = text.replace(
             old_t5,
             "",
             1,
         )
-        changed = True
-        print("✅ Removed explicit T5 GPU move from inference.py")
+
+        print(
+            "✅ Removed explicit T5 GPU move from inference.py"
+        )
+
     else:
-        print("✅ No explicit T5 GPU move found in inference.py")
 
-    if changed:
-        write_text(INFERENCE_FILE, text)
+        print(
+            "✅ No explicit T5 GPU move found in inference.py"
+        )
 
-    print("✅ inference.py patch check complete")
+    # ========================================================
+    # SAFETY CHECKS
+    # ========================================================
+
+    if "pipeline = pipeline.to(device)" in text:
+
+        fail(
+            "pipeline.to(device) is still present in inference.py"
+        )
+
+    if "pipeline._ltx_execution_device = torch.device(device)" not in text:
+
+        fail(
+            "Explicit LTX execution device was not added to "
+            "inference.py"
+        )
+
+    write_text(
+        INFERENCE_FILE,
+        text,
+    )
+
+    print("✅ inference.py patched")
 
 
 # ============================================================
@@ -500,7 +542,24 @@ def verify_patch():
     )
 
     # --------------------------------------------------------
-    # Check 4: actual concatenation exists.
+    # Check 4: pipeline.to(device) must NOT remain in
+    # inference.py, because it moves the T5 encoder to CUDA.
+    # --------------------------------------------------------
+
+    pipeline_to_check = (
+        "pipeline = pipeline.to(device)"
+        not in inference
+    )
+
+    checks.append(
+        (
+            "pipeline.to(device) no longer moves T5 to GPU",
+            pipeline_to_check,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Check 5: actual concatenation exists.
     # --------------------------------------------------------
 
     concat_check = (
