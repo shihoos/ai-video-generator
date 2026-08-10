@@ -121,7 +121,30 @@ def main():
         default=None,
         help="Output directory",
     )
+    
+    parser.add_argument(
+        "--conditioning-media",
+        nargs="+",
+        default=None,
+        help="Optional image/video reference files for LTX conditioning",
+    )
 
+    parser.add_argument(
+        "--conditioning-start-frames",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Frame positions for conditioning media",
+    )
+
+    parser.add_argument(
+        "--conditioning-strengths",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Conditioning strengths, one per reference",
+    )
+    
     parser.add_argument(
         "--offload",
         action="store_true",
