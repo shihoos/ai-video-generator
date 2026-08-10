@@ -4,12 +4,28 @@ from pathlib import Path
 PROJECT_ROOT = Path("/kaggle/working/ai-video-generator")
 LTX_REPO = PROJECT_ROOT / "LTX-Video-0.9.8"
 
-INFERENCE_FILE = LTX_REPO / "ltx_video" / "inference.py"
-PIPELINE_FILE = LTX_REPO / "ltx_video" / "pipelines" / "pipeline_ltx_video.py"
+INFERENCE_FILE = (
+    LTX_REPO / "ltx_video" / "inference.py"
+)
+
+PIPELINE_FILE = (
+    LTX_REPO
+    / "ltx_video"
+    / "pipelines"
+    / "pipeline_ltx_video.py"
+)
 
 
 def replace_once(text, old, new, description):
+    """
+    Replace one exact block.
+
+    Returns:
+        (new_text, changed)
+    """
+
     if new in text:
+        print(f"✅ Already patched: {description}")
         return text, False
 
     if old not in text:
@@ -17,14 +33,23 @@ def replace_once(text, old, new, description):
             f"Could not find expected LTX code for: {description}"
         )
 
+    print(f"🔧 Applying: {description}")
+
     return text.replace(old, new, 1), True
 
+
+# ============================================================
+# PATCH INFERENCE.PY
+# ============================================================
 
 def patch_inference():
     text = INFERENCE_FILE.read_text()
 
+    changed = False
+
     # --------------------------------------------------------
-    # 1. Keep the huge T5 text encoder on CPU.
+    # Keep transformer + VAE on GPU.
+    # Keep the large T5 text encoder on CPU.
     # --------------------------------------------------------
 
     old = """    transformer = transformer.to(device)
@@ -35,24 +60,22 @@ def patch_inference():
     new = """    transformer = transformer.to(device)
     vae = vae.to(device)
 
-    # T4 memory fix:
+    # T4 memory optimization:
     # Keep the large T5 text encoder on CPU.
-    # It will be used from CPU and its embeddings are moved to GPU.
-    # Moving the full text encoder to a 15 GB T4 causes OOM.
+    # Only its generated embeddings need to reach the GPU.
 """
 
-    text, changed = replace_once(
+    text, did_change = replace_once(
         text,
         old,
         new,
-        "keep text encoder on CPU",
+        "keep T5 text encoder on CPU",
     )
 
+    changed = changed or did_change
+
     # --------------------------------------------------------
-    # 2. Do NOT call pipeline.to(device).
-    #
-    # That would move the CPU text encoder back to GPU.
-    # Transformer and VAE were already moved explicitly above.
+    # Prevent pipeline.to(device) from moving T5 to GPU.
     # --------------------------------------------------------
 
     old = """    pipeline = LTXVideoPipeline(**submodel_dict)
@@ -62,24 +85,26 @@ def patch_inference():
 
     new = """    pipeline = LTXVideoPipeline(**submodel_dict)
 
-    # T4 memory fix:
-    # Do not call pipeline.to(device), because that would move
-    # the CPU-resident text encoder onto the GPU.
+    # T4 memory optimization:
+    # Do NOT call pipeline.to(device).
+    # That would move the large T5 text encoder to GPU.
     pipeline._ltx_execution_device = torch.device(device)
 
     return pipeline
 """
 
-    text, changed2 = replace_once(
+    text, did_change = replace_once(
         text,
         old,
         new,
-        "prevent pipeline.to(device) from moving text encoder",
+        "prevent pipeline.to(device)",
     )
 
+    changed = changed or did_change
+
     # --------------------------------------------------------
-    # 3. Use the explicit execution device for the multi-scale
-    # upscaler rather than pipeline.device.
+    # Multi-scale upscaler should use the actual execution
+    # device rather than pipeline.device.
     # --------------------------------------------------------
 
     old = """        latent_upsampler = create_latent_upsampler(
@@ -92,87 +117,120 @@ def patch_inference():
         )
 """
 
-    text, changed3 = replace_once(
+    text, did_change = replace_once(
         text,
         old,
         new,
-        "use explicit GPU device for spatial upscaler",
+        "use explicit execution device for upscaler",
     )
+
+    changed = changed or did_change
 
     INFERENCE_FILE.write_text(text)
 
-    return changed or changed2 or changed3
+    return changed
 
+
+# ============================================================
+# PATCH PIPELINE_LTX_VIDEO.PY
+# ============================================================
 
 def patch_pipeline():
     text = PIPELINE_FILE.read_text()
 
-    # Add an explicit execution-device property to LTXVideoPipeline.
-    old = """class LTXVideoPipeline(DiffusionPipeline):
-    r\"\"\"
+    changed = False
+
+    # --------------------------------------------------------
+    # Add explicit execution device property.
+    #
+    # Diffusers normally determines the device from modules.
+    # Our T5 intentionally remains on CPU, so we explicitly
+    # remember which device the LTX transformer should use.
+    # --------------------------------------------------------
+
+    marker = """class LTXVideoPipeline(DiffusionPipeline):
 """
 
-    new = """class LTXVideoPipeline(DiffusionPipeline):
+    property_block = """class LTXVideoPipeline(DiffusionPipeline):
+
     @property
     def _execution_device(self):
-        # T4 memory fix:
-        # The text encoder intentionally stays on CPU, so the normal
-        # Diffusers device detection cannot be used here.
-        # The actual LTX execution device is stored explicitly.
+        # T4 memory optimization:
+        # The T5 text encoder intentionally remains on CPU.
+        # Therefore the normal Diffusers device detection is
+        # not suitable for this pipeline.
         if hasattr(self, "_ltx_execution_device"):
             return self._ltx_execution_device
 
         return self.device
 
-    r\"\"\"
 """
 
-    text, changed = replace_once(
+    if "def _execution_device(self):" in text:
+        print("✅ Already patched: explicit LTX execution device")
+    else:
+        if marker not in text:
+            raise RuntimeError(
+                "Could not find LTXVideoPipeline class."
+            )
+
+        print(
+            "🔧 Applying: explicit LTX execution device"
+        )
+
+        text = text.replace(
+            marker,
+            property_block,
+            1,
+        )
+
+        changed = True
+
+    # --------------------------------------------------------
+    # CRITICAL T4 FIX
+    #
+    # Original:
+    #
+    # if self.text_encoder is not None:
+    #     self.text_encoder = self.text_encoder.to(
+    #         self._execution_device
+    #     )
+    #
+    # This moves the huge T5 encoder onto the 15 GB T4.
+    #
+    # New:
+    #
+    # only move it when CPU offloading is NOT requested.
+    # With --offload, it remains on CPU.
+    # --------------------------------------------------------
+
+    old = """        if self.text_encoder is not None:
+            self.text_encoder = self.text_encoder.to(self._execution_device)
+"""
+
+    new = """        if self.text_encoder is not None and not offload_to_cpu:
+            self.text_encoder = self.text_encoder.to(
+                self._execution_device
+            )
+"""
+
+    text, did_change = replace_once(
         text,
         old,
         new,
-        "explicit LTX execution device",
+        "keep T5 encoder on CPU during inference",
     )
 
-    # --------------------------------------------------------
-    # Do not move the text encoder to GPU when CPU offload is
-    # requested.
-    # --------------------------------------------------------
-
-    old = """        # 3. Encode input prompt
-        if self.text_encoder is not None:
-            self.text_encoder = self.text_encoder.to(self._execution_device)
-        (
-"""
-
-    new = """        # 3. Encode input prompt
-        #
-        # T4 memory fix:
-        # When offload_to_cpu is enabled, keep the large T5 encoder
-        # on CPU. encode_prompt() runs the encoder on its current
-        # device and moves only the resulting embeddings to GPU.
-        if self.text_encoder is not None and not offload_to_cpu:
-            self.text_encoder = self.text_encoder.to(self._execution_device)
-        (
-"""
-
-    text, changed2 = replace_once(
-        text,
-        old,
-        new,
-        "keep text encoder on CPU during prompt encoding",
-    )
-
-    # --------------------------------------------------------
-    # If the encoder isn't using a CPU-offload hook, the original
-    # code's explicit CPU move is still useful. With our direct
-    # CPU placement it is harmless.
-    # --------------------------------------------------------
+    changed = changed or did_change
 
     PIPELINE_FILE.write_text(text)
 
-    return changed or changed2
+    return changed
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
     print("=" * 60)
@@ -180,13 +238,19 @@ def main():
     print("=" * 60)
 
     if not INFERENCE_FILE.exists():
-        raise FileNotFoundError(INFERENCE_FILE)
+        raise FileNotFoundError(
+            f"Missing: {INFERENCE_FILE}"
+        )
 
     if not PIPELINE_FILE.exists():
-        raise FileNotFoundError(PIPELINE_FILE)
+        raise FileNotFoundError(
+            f"Missing: {PIPELINE_FILE}"
+        )
 
     inference_changed = patch_inference()
     pipeline_changed = patch_pipeline()
+
+    print()
 
     if inference_changed or pipeline_changed:
         print("✅ LTX T4 memory patch applied")
