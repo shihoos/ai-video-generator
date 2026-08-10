@@ -1,0 +1,8 @@
+# Local LTX repository
+LTX-Video-0.9.8/
+
+# Python cache
+kaggle/__pycache__/
+
+# Temporary generated files
+work/
