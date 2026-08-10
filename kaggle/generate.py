@@ -49,6 +49,15 @@ def build_test_config():
         "prompt_enhancement_words_threshold: 120",
         "prompt_enhancement_words_threshold: 0",
     )
+    
+    # T4 memory optimization:
+    # The official 0.6666666 scale causes the second
+    # multi-scale refinement pass to exceed 15 GB T4 VRAM
+    # when generating 720p video.
+    text = text.replace(
+        "downscale_factor: 0.6666666",
+        "downscale_factor: 0.48",
+    )
 
     test_config = PROJECT_ROOT / "work" / "ltx-inference.yaml"
     test_config.parent.mkdir(
