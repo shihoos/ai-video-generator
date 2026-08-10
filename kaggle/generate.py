@@ -3,11 +3,43 @@ import sys
 from pathlib import Path
 
 
+# ============================================================
+# PROJECT PATHS
+# ============================================================
+
 PROJECT_ROOT = Path("/kaggle/working/ai-video-generator")
+
 KAGGLE_DIR = PROJECT_ROOT / "kaggle"
 
+LTX_ROOT = PROJECT_ROOT / "LTX-Video-0.9.8"
+
+
+# ============================================================
+# PYTHON IMPORT PATHS
+# ============================================================
+
+# Project's kaggle/ directory
 if str(KAGGLE_DIR) not in sys.path:
     sys.path.insert(0, str(KAGGLE_DIR))
+
+
+# LTX-Video 0.9.8 source
+#
+# We intentionally load LTX directly from the checked-out
+# source instead of depending on the separately installed
+# ltx-video pip package.
+if not LTX_ROOT.is_dir():
+    raise FileNotFoundError(
+        f"LTX-Video source not found: {LTX_ROOT}"
+    )
+
+if str(LTX_ROOT) not in sys.path:
+    sys.path.insert(0, str(LTX_ROOT))
+
+
+# ============================================================
+# PROJECT CONFIG
+# ============================================================
 
 from config import (
     LTX_MODEL,
@@ -15,7 +47,6 @@ from config import (
     LTX_CONFIG,
     OUTPUT_DIR,
 )
-
 
 def build_test_config():
     """
