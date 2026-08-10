@@ -148,6 +148,7 @@ def main():
     print("=" * 60)
 
     check_gpu()
+    check_python_environment()
     check_model()
     setup_directories()
     clone_ltx()
