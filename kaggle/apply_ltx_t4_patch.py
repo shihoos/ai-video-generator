@@ -280,20 +280,23 @@ def patch_pipeline():
             "pipeline_ltx_video.py. Cannot safely patch generation device."
         )
 
-    elif execution_device_occurrences > 1:
-        raise RuntimeError(
-            "Found multiple `device = self._execution_device` assignments "
-            "in pipeline_ltx_video.py. Refusing an ambiguous automatic patch."
-        )
-
     else:
-        text = replace_once(
-            text,
+        # The 0.9.8 source contains more than one pipeline __call__
+        # implementation (the base video pipeline and the multi-scale
+        # wrapper). Both can derive their local device from Diffusers'
+        # _execution_device when CPU offload is enabled.
+        #
+        # Replace ALL exact assignments so neither layer can silently
+        # switch the actual generation device back to CPU.
+        text = text.replace(
             old_execution_device,
             new_execution_device,
-            "force LTX generation device instead of Diffusers offload device",
         )
-        print("✅ LTX generation device now uses explicit execution device")
+
+        print(
+            f"✅ Patched {execution_device_occurrences} "
+            "LTX execution-device assignments"
+        )
 
     # ========================================================
     # FIX 3: Attention masks
@@ -537,18 +540,28 @@ def verify_patch():
     # ========================================================
 
     execution_device_patch_check = (
-        "device = getattr("
-        in pipeline
-        and "_ltx_execution_device"
-        in pipeline
-        and "self._execution_device"
-        in pipeline
+        "device = self._execution_device" not in pipeline
+        and pipeline.count("device = getattr(") >= 1
+        and "_ltx_execution_device" in pipeline
+        and "self._execution_device" in pipeline
     )
 
     checks.append(
         (
             "LTX generation device overrides Diffusers CPU offload device",
             execution_device_patch_check,
+        )
+    )
+
+    # No unpatched Diffusers execution-device assignment may remain.
+    no_unpatched_execution_device = (
+        "device = self._execution_device" not in pipeline
+    )
+
+    checks.append(
+        (
+            "No unpatched Diffusers CPU execution-device assignment remains",
+            no_unpatched_execution_device,
         )
     )
 
