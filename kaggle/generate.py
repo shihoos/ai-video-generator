@@ -134,7 +134,18 @@ def main():
         raise FileNotFoundError(
             f"LTX spatial upscaler not found: {LTX_UPSCALER}"
         )
+    import torch
 
+    if torch.cuda.is_available():
+        free_gb = (
+            torch.cuda.mem_get_info()[0]
+            / (1024 ** 3)
+        )
+
+        print(
+            f"GPU free memory before inference: "
+            f"{free_gb:.2f} GB"
+        )
     # --------------------------------------------------------
     # Build temporary configuration
     # --------------------------------------------------------
