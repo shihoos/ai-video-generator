@@ -678,10 +678,7 @@ def generate_shot(
         / f"shot_{shot_index:03d}"
     )
 
-    shot_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    ensure_real_directory(shot_dir)
 
     characters = shot.get(
         "characters",
@@ -895,11 +892,6 @@ def assemble(videos):
     )
     concat = create_concat_file(
         videos
-    )
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
     )
 
     final_video = (
