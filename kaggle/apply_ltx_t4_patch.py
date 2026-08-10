@@ -1,8 +1,12 @@
 from pathlib import Path
+import subprocess
+import sys
 
 
 PROJECT_ROOT = Path("/kaggle/working/ai-video-generator")
 LTX_REPO = PROJECT_ROOT / "LTX-Video-0.9.8"
+
+LTX_COMMIT = "bdc8f01"
 
 INFERENCE_FILE = (
     LTX_REPO / "ltx_video" / "inference.py"
@@ -16,40 +20,61 @@ PIPELINE_FILE = (
 )
 
 
-def replace_once(text, old, new, description):
-    """
-    Replace one exact block.
+def run(command):
+    print(f"\n$ {command}")
 
-    Returns:
-        (new_text, changed)
-    """
+    result = subprocess.run(
+        command,
+        shell=True,
+        text=True,
+    )
 
-    if new in text:
-        print(f"✅ Already patched: {description}")
-        return text, False
-
-    if old not in text:
-        raise RuntimeError(
-            f"Could not find expected LTX code for: {description}"
-        )
-
-    print(f"🔧 Applying: {description}")
-
-    return text.replace(old, new, 1), True
+    if result.returncode != 0:
+        print(f"\n❌ Command failed: {command}")
+        sys.exit(result.returncode)
 
 
 # ============================================================
-# PATCH INFERENCE.PY
+# RESTORE EXACT LTX 0.9.8 SOURCE
+# ============================================================
+
+def restore_ltx_files():
+    print("\n" + "=" * 60)
+    print("RESTORING LTX 0.9.8 SOURCE")
+    print("=" * 60)
+
+    if not LTX_REPO.exists():
+        raise FileNotFoundError(
+            f"LTX repository not found: {LTX_REPO}"
+        )
+
+    # Restore only the two files that our runtime patch modifies.
+    # This removes any incomplete patch from a previous Kaggle run.
+    run(
+        f"git -C {LTX_REPO} checkout {LTX_COMMIT} -- "
+        f"ltx_video/inference.py "
+        f"ltx_video/pipelines/pipeline_ltx_video.py"
+    )
+
+    print(
+        f"✅ LTX files restored from clean revision {LTX_COMMIT}"
+    )
+
+
+# ============================================================
+# PATCH inference.py
 # ============================================================
 
 def patch_inference():
-    text = INFERENCE_FILE.read_text()
+    print("\n" + "=" * 60)
+    print("PATCHING inference.py")
+    print("=" * 60)
 
-    changed = False
+    text = INFERENCE_FILE.read_text()
 
     # --------------------------------------------------------
     # Keep transformer + VAE on GPU.
-    # Keep the large T5 text encoder on CPU.
+    # Keep the huge T5 text encoder on CPU.
     # --------------------------------------------------------
 
     old = """    transformer = transformer.to(device)
@@ -65,14 +90,13 @@ def patch_inference():
     # Only its generated embeddings need to reach the GPU.
 """
 
-    text, did_change = replace_once(
-        text,
-        old,
-        new,
-        "keep T5 text encoder on CPU",
-    )
+    if old not in text:
+        raise RuntimeError(
+            "Expected original text encoder placement code "
+            "was not found in inference.py"
+        )
 
-    changed = changed or did_change
+    text = text.replace(old, new, 1)
 
     # --------------------------------------------------------
     # Prevent pipeline.to(device) from moving T5 to GPU.
@@ -93,18 +117,16 @@ def patch_inference():
     return pipeline
 """
 
-    text, did_change = replace_once(
-        text,
-        old,
-        new,
-        "prevent pipeline.to(device)",
-    )
+    if old not in text:
+        raise RuntimeError(
+            "Expected pipeline.to(device) code "
+            "was not found in inference.py"
+        )
 
-    changed = changed or did_change
+    text = text.replace(old, new, 1)
 
     # --------------------------------------------------------
-    # Multi-scale upscaler should use the actual execution
-    # device rather than pipeline.device.
+    # Multi-scale upscaler uses explicit execution device.
     # --------------------------------------------------------
 
     old = """        latent_upsampler = create_latent_upsampler(
@@ -117,35 +139,32 @@ def patch_inference():
         )
 """
 
-    text, did_change = replace_once(
-        text,
-        old,
-        new,
-        "use explicit execution device for upscaler",
-    )
+    if old not in text:
+        raise RuntimeError(
+            "Expected spatial upscaler device code "
+            "was not found in inference.py"
+        )
 
-    changed = changed or did_change
+    text = text.replace(old, new, 1)
 
     INFERENCE_FILE.write_text(text)
 
-    return changed
+    print("✅ inference.py patched")
 
 
 # ============================================================
-# PATCH PIPELINE_LTX_VIDEO.PY
+# PATCH pipeline_ltx_video.py
 # ============================================================
 
 def patch_pipeline():
+    print("\n" + "=" * 60)
+    print("PATCHING pipeline_ltx_video.py")
+    print("=" * 60)
+
     text = PIPELINE_FILE.read_text()
 
-    changed = False
-
     # --------------------------------------------------------
-    # Add explicit execution device property.
-    #
-    # Diffusers normally determines the device from modules.
-    # Our T5 intentionally remains on CPU, so we explicitly
-    # remember which device the LTX transformer should use.
+    # Add explicit execution device.
     # --------------------------------------------------------
 
     marker = """class LTXVideoPipeline(DiffusionPipeline):
@@ -166,28 +185,19 @@ def patch_pipeline():
 
 """
 
-    if "def _execution_device(self):" in text:
-        print("✅ Already patched: explicit LTX execution device")
-    else:
-        if marker not in text:
-            raise RuntimeError(
-                "Could not find LTXVideoPipeline class."
-            )
-
-        print(
-            "🔧 Applying: explicit LTX execution device"
+    if marker not in text:
+        raise RuntimeError(
+            "LTXVideoPipeline class was not found."
         )
 
-        text = text.replace(
-            marker,
-            property_block,
-            1,
-        )
-
-        changed = True
+    text = text.replace(
+        marker,
+        property_block,
+        1,
+    )
 
     # --------------------------------------------------------
-    # CRITICAL T4 FIX
+    # CRITICAL MEMORY FIX
     #
     # Original:
     #
@@ -196,12 +206,11 @@ def patch_pipeline():
     #         self._execution_device
     #     )
     #
-    # This moves the huge T5 encoder onto the 15 GB T4.
+    # This moves the huge T5 encoder onto the T4.
     #
     # New:
     #
-    # only move it when CPU offloading is NOT requested.
-    # With --offload, it remains on CPU.
+    # When --offload is used, leave T5 on CPU.
     # --------------------------------------------------------
 
     old = """        if self.text_encoder is not None:
@@ -214,18 +223,62 @@ def patch_pipeline():
             )
 """
 
-    text, did_change = replace_once(
-        text,
-        old,
-        new,
-        "keep T5 encoder on CPU during inference",
-    )
+    if old not in text:
+        raise RuntimeError(
+            "Expected text encoder GPU transfer code "
+            "was not found in pipeline_ltx_video.py"
+        )
 
-    changed = changed or did_change
+    text = text.replace(old, new, 1)
 
     PIPELINE_FILE.write_text(text)
 
-    return changed
+    print("✅ pipeline_ltx_video.py patched")
+
+
+# ============================================================
+# VERIFY PATCH
+# ============================================================
+
+def verify_patch():
+    print("\n" + "=" * 60)
+    print("VERIFYING T4 PATCH")
+    print("=" * 60)
+
+    inference_text = INFERENCE_FILE.read_text()
+    pipeline_text = PIPELINE_FILE.read_text()
+
+    checks = [
+        (
+            "T5 remains off GPU during --offload",
+            "if self.text_encoder is not None and not offload_to_cpu:"
+            in pipeline_text,
+        ),
+        (
+            "Explicit LTX execution device",
+            "pipeline._ltx_execution_device = torch.device(device)"
+            in inference_text,
+        ),
+        (
+            "T5 no longer explicitly moved to GPU in inference",
+            "text_encoder = text_encoder.to(device)"
+            not in inference_text,
+        ),
+        (
+            "Upscaler uses explicit device",
+            "spatial_upscaler_model_path, device"
+            in inference_text,
+        ),
+    ]
+
+    for description, result in checks:
+        if result:
+            print(f"✅ {description}")
+        else:
+            print(f"❌ {description}")
+            sys.exit(1)
+
+    print("\n✅ All T4 memory patch checks passed")
 
 
 # ============================================================
@@ -233,30 +286,17 @@ def patch_pipeline():
 # ============================================================
 
 def main():
-    print("=" * 60)
+    print("\n" + "=" * 60)
     print("LTX-VIDEO T4 MEMORY PATCH")
     print("=" * 60)
 
-    if not INFERENCE_FILE.exists():
-        raise FileNotFoundError(
-            f"Missing: {INFERENCE_FILE}"
-        )
+    restore_ltx_files()
+    patch_inference()
+    patch_pipeline()
+    verify_patch()
 
-    if not PIPELINE_FILE.exists():
-        raise FileNotFoundError(
-            f"Missing: {PIPELINE_FILE}"
-        )
-
-    inference_changed = patch_inference()
-    pipeline_changed = patch_pipeline()
-
-    print()
-
-    if inference_changed or pipeline_changed:
-        print("✅ LTX T4 memory patch applied")
-    else:
-        print("✅ LTX T4 memory patch already applied")
-
+    print("\n" + "=" * 60)
+    print("✅ LTX T4 MEMORY PATCH COMPLETE")
     print("=" * 60)
 
 
