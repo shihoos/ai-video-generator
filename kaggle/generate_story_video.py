@@ -1,5 +1,6 @@
 import argparse
 import gc
+import hashlib
 import json
 import re
 import shutil
@@ -72,6 +73,154 @@ from video_config import (
     REFERENCE_START_FRAME,
     FINAL_VIDEO_NAME,
 )
+
+
+# ============================================================
+# GENERATION FINGERPRINT / RESUME
+# ============================================================
+#
+# A run is only treated as "the same generation" if the story
+# text AND the technical settings that affect shot output are
+# identical to the previous run. This prevents silently
+# reusing shots that were rendered under a different
+# resolution, frame budget or model.
+#
+# If the fingerprint changes, previous clips are cleared.
+# If it matches, completed shots are reused.
+# ============================================================
+
+FINGERPRINT_FILE = (
+    CLIPS_DIR / ".generation_fingerprint.json"
+)
+
+STORY_PLAN_FILE = (
+    CLIPS_DIR / "story_plan.json"
+)
+
+# Bump this manually if you change the planner prompt text
+# (build_planner_prompt) in a way that should invalidate old
+# shots even though the story itself is unchanged.
+PLANNER_PROMPT_VERSION = 1
+
+
+def compute_fingerprint(story):
+    """Build a fingerprint covering the story and every
+    technical setting that affects how a shot is rendered."""
+
+    payload = {
+        "story": story.strip(),
+        "planner_prompt_version": PLANNER_PROMPT_VERSION,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "source_fps": SOURCE_FPS,
+        "frames_per_shot": FRAMES_PER_SHOT,
+        "qwen_model_id": QWEN_MODEL_ID,
+        "base_seed": BASE_SEED,
+        "reference_strength": REFERENCE_STRENGTH,
+    }
+
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+    ).encode("utf-8")
+
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def prepare_story_workspace(story, force_clean=False):
+    """
+    Decide whether existing shot clips (and the saved storyboard)
+    can be reused.
+
+    Returns True if this is a resumed run (same fingerprint,
+    safe to skip re-planning and reuse existing shots), False
+    if the workspace was cleaned and generation starts fresh.
+    """
+
+    ensure_real_directory(CLIPS_DIR)
+
+    current_fingerprint = compute_fingerprint(story)
+
+    if force_clean:
+        print()
+        print("🧹 --force-clean requested. Wiping previous clips.")
+        clean_directory(CLIPS_DIR)
+        ensure_real_directory(CLIPS_DIR)
+        FINGERPRINT_FILE.write_text(
+            current_fingerprint,
+            encoding="utf-8",
+        )
+        return False
+
+    if not FINGERPRINT_FILE.exists():
+        FINGERPRINT_FILE.write_text(
+            current_fingerprint,
+            encoding="utf-8",
+        )
+        return False
+
+    previous_fingerprint = (
+        FINGERPRINT_FILE.read_text(encoding="utf-8").strip()
+    )
+
+    if previous_fingerprint == current_fingerprint:
+        print()
+        print(
+            "♻️ Matching generation fingerprint detected."
+        )
+        print(
+            "Existing completed shots will be reused."
+        )
+        return True
+
+    print()
+    print(
+        "🆕 Story or technical settings changed since last run."
+    )
+    print(
+        "Cleaning previous story clips..."
+    )
+
+    clean_directory(CLIPS_DIR)
+    ensure_real_directory(CLIPS_DIR)
+
+    FINGERPRINT_FILE.write_text(
+        current_fingerprint,
+        encoding="utf-8",
+    )
+
+    return False
+
+
+def load_saved_plan():
+    """Load a previously saved storyboard, if one exists."""
+
+    if not STORY_PLAN_FILE.exists():
+        return None
+
+    try:
+        return json.loads(
+            STORY_PLAN_FILE.read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError:
+        print(
+            "⚠️ Saved story plan could not be parsed. "
+            "Re-planning with Qwen."
+        )
+        return None
+
+
+def save_story_plan(plan):
+    """Save the generated storyboard for inspection/debugging."""
+
+    ensure_real_directory(CLIPS_DIR)
+
+    STORY_PLAN_FILE.write_text(
+        json.dumps(plan, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    print(f"✅ Story plan saved: {STORY_PLAN_FILE}")
 
 
 # ============================================================
@@ -273,9 +422,19 @@ def index_reference_files():
 
 
 def match_references(names, references):
-    """Match planner character/reference names to local files."""
+    """
+    Match planner character/reference names to local files.
+
+    Priority:
+        1. Exact normalized match.
+        2. Fuzzy (substring) match, but only when exactly one
+           candidate exists. A warning is printed.
+        3. If a fuzzy match is ambiguous (multiple candidates),
+           attach nothing rather than guessing.
+    """
 
     matches = []
+    seen = set()
 
     normalized_names = [
         clean_name(name)
@@ -283,20 +442,18 @@ def match_references(names, references):
         if str(name).strip()
     ]
 
-    seen = set()
+    # --------------------------------------------------------
+    # Pass 1: exact matches
+    # --------------------------------------------------------
 
-    for reference in references:
-        ref_name = clean_name(reference["name"])
+    for requested in normalized_names:
+        if not requested:
+            continue
 
-        for requested in normalized_names:
-            if not requested or not ref_name:
-                continue
+        for reference in references:
+            ref_name = clean_name(reference["name"])
 
-            if (
-                requested == ref_name
-                or requested in ref_name
-                or ref_name in requested
-            ):
+            if ref_name and ref_name == requested:
                 key = str(reference["path"])
 
                 if key not in seen:
@@ -304,6 +461,48 @@ def match_references(names, references):
                     seen.add(key)
 
                 break
+
+    matched_names = {
+        clean_name(item["name"]) for item in matches
+    }
+
+    # --------------------------------------------------------
+    # Pass 2: fuzzy fallback only for names with no exact match
+    # --------------------------------------------------------
+
+    for requested in normalized_names:
+        if not requested or requested in matched_names:
+            continue
+
+        candidates = [
+            reference
+            for reference in references
+            if clean_name(reference["name"])
+            and (
+                requested in clean_name(reference["name"])
+                or clean_name(reference["name"]) in requested
+            )
+        ]
+
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            key = str(candidate["path"])
+
+            if key not in seen:
+                print(
+                    "⚠️ Fuzzy reference match: requested "
+                    f"'{requested}' matched "
+                    f"'{candidate['name']}'"
+                )
+
+                matches.append(candidate)
+                seen.add(key)
+
+        elif len(candidates) > 1:
+            print(
+                f"⚠️ Ambiguous reference '{requested}' matched "
+                f"{len(candidates)} files. No reference attached."
+            )
 
     return matches
 
@@ -929,6 +1128,29 @@ def generate_shot(
 
     ensure_real_directory(shot_dir)
 
+    # ----------------------------------------------------------
+    # Resume: reuse this shot if it was already rendered under
+    # the same generation fingerprint.
+    # ----------------------------------------------------------
+
+    existing_videos = list(shot_dir.glob("*.mp4"))
+
+    if existing_videos:
+        existing_videos.sort(
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+        print()
+        print(
+            f"♻️ Shot {shot_index} already exists, "
+            "reusing it (delete its folder or use "
+            "--force-clean to regenerate)."
+        )
+        print(f"   {existing_videos[0]}")
+
+        return existing_videos[0]
+
     characters = shot.get(
         "characters",
         [],
@@ -1192,6 +1414,16 @@ def main():
         help="Story text to convert into a cinematic video.",
     )
 
+    parser.add_argument(
+        "--force-clean",
+        action="store_true",
+        help=(
+            "Ignore any existing shot clips and regenerate "
+            "everything from scratch, even if the story and "
+            "settings are unchanged."
+        ),
+    )
+
     args = parser.parse_args()
 
     story = args.story.strip()
@@ -1202,6 +1434,13 @@ def main():
         )
 
     check_requirements()
+
+    # CLEAN_TEMPORARY_CLIPS in video_config.py acts as a manual
+    # always-clean override on top of --force-clean.
+    force_clean = (
+        args.force_clean
+        or CLEAN_TEMPORARY_CLIPS
+    )
 
     references = index_reference_files()
 
@@ -1223,35 +1462,48 @@ def main():
             "No character/reference images found."
         )
 
-    print()
-    print("=" * 70)
-    print("PLANNING STORY")
-    print("=" * 70)
+    # ----------------------------------------------------------
+    # Resume decision: must happen before planning, since a
+    # matching fingerprint means we can skip Qwen entirely and
+    # reuse the previously saved storyboard.
+    # ----------------------------------------------------------
 
-    print(
-        f"Story length: {len(story)} characters"
-    )
-
-    plan = plan_story(
+    is_resume = prepare_story_workspace(
         story,
-        references,
+        force_clean=force_clean,
     )
 
-    plan = validate_and_normalize_plan(
-        plan
-    )
+    plan = load_saved_plan() if is_resume else None
 
-    print_plan(plan)
-
-    if CLEAN_TEMPORARY_CLIPS:
+    if plan is not None:
         print()
         print(
-            "Cleaning previous temporary story clips..."
+            "♻️ Reusing previously saved storyboard "
+            "(skipping Qwen planning)."
+        )
+        plan = validate_and_normalize_plan(plan)
+    else:
+        print()
+        print("=" * 70)
+        print("PLANNING STORY")
+        print("=" * 70)
+
+        print(
+            f"Story length: {len(story)} characters"
         )
 
-        clean_directory(
-            CLIPS_DIR
+        plan = plan_story(
+            story,
+            references,
         )
+
+        plan = validate_and_normalize_plan(
+            plan
+        )
+
+        save_story_plan(plan)
+
+    print_plan(plan)
 
     ensure_real_directory(
         OUTPUT_DIR
