@@ -219,7 +219,7 @@ QWEN_MAX_NEW_TOKENS = 2500
 
 # Sampling settings.
 
-QWEN_DO_SAMPLE = True
+QWEN_DO_SAMPLE = False
 
 QWEN_TEMPERATURE = 0.4
 
@@ -334,7 +334,7 @@ DEFAULT_AUDIO = None
 #
 # Final videos in work/output are preserved.
 
-CLEAN_TEMPORARY_CLIPS = True
+CLEAN_TEMPORARY_CLIPS = False
 
 
 # ============================================================
