@@ -27,15 +27,8 @@ LTX_CONFIG = LTX_REPO / "configs" / "ltxv-2b-0.9.8-distilled.yaml"
 
 # Temporary working directories
 WORK_DIR = PROJECT_ROOT / "work"
-CLIPS_DIR = WORK_DIR / "clips"
-FRAMES_DIR = WORK_DIR / "frames"
 OUTPUT_DIR = WORK_DIR / "output"
 
 # Make sure directories exist
-for directory in [
-    WORK_DIR,
-    CLIPS_DIR,
-    FRAMES_DIR,
-    OUTPUT_DIR,
-]:
+
     directory.mkdir(parents=True, exist_ok=True)
