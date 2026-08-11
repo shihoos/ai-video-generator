@@ -19,18 +19,6 @@ KAGGLE_DIR = PROJECT_ROOT / "kaggle"
 LTX_REPO = PROJECT_ROOT / "LTX-Video-0.9.8"
 
 # ============================================================
-# QWEN STORY PLANNER
-# ============================================================
-
-# Qwen is stored permanently in the Kaggle Dataset.
-QWEN_MODEL_DIR = (
-    Path("/kaggle/input/datasets/shihoos")
-    / "ai-video-model"
-    / "qwen3-4b-instruct-2507"
-)
-
-
-# ============================================================
 # PYTHON IMPORT PATH
 # ============================================================
 
@@ -48,6 +36,17 @@ from config import (
     CLIPS_DIR,
     FRAMES_DIR,
     OUTPUT_DIR,
+)
+
+# ============================================================
+# QWEN STORY PLANNER
+# ============================================================
+#
+# The Qwen Dataset path now has a single source of truth in
+# video_config.py. start.py no longer defines it separately.
+
+from video_config import (
+    QWEN_LOCAL_MODEL,
 )
 
 
@@ -388,19 +387,19 @@ def check_models():
     # QWEN
     # --------------------------------------------------------
 
-    if QWEN_MODEL_DIR.is_dir():
+    if QWEN_LOCAL_MODEL.is_dir():
 
         print(
             "\n✅ Qwen3 story planner found"
         )
 
         print(
-            f"Path: {QWEN_MODEL_DIR}"
+            f"Path: {QWEN_LOCAL_MODEL}"
         )
 
         # Count model files
         model_files = list(
-            QWEN_MODEL_DIR.glob(
+            QWEN_LOCAL_MODEL.glob(
                 "*.safetensors"
             )
         )
@@ -417,7 +416,7 @@ def check_models():
         )
 
         print(
-            QWEN_MODEL_DIR
+            QWEN_LOCAL_MODEL
         )
 
         print(
@@ -916,14 +915,14 @@ def verify_qwen():
     print("QWEN3 STORY PLANNER CHECK")
     print("=" * 70)
 
-    if not QWEN_MODEL_DIR.is_dir():
+    if not QWEN_LOCAL_MODEL.is_dir():
 
         print(
             "⚠️ Local Qwen3 model not found."
         )
 
         print(
-            QWEN_MODEL_DIR
+            QWEN_LOCAL_MODEL
         )
 
         print(
@@ -942,7 +941,7 @@ def verify_qwen():
     for filename in required_files:
 
         path = (
-            QWEN_MODEL_DIR
+            QWEN_LOCAL_MODEL
             / filename
         )
 
@@ -971,7 +970,7 @@ def verify_qwen():
     )
 
     print(
-        f"Path: {QWEN_MODEL_DIR}"
+        f"Path: {QWEN_LOCAL_MODEL}"
     )
 
 
@@ -1007,7 +1006,7 @@ def print_final_status():
     )
 
     print(
-        f"Qwen3 model    : {QWEN_MODEL_DIR}"
+        f"Qwen3 model    : {QWEN_LOCAL_MODEL}"
     )
 
     print(
