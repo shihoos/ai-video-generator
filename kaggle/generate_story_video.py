@@ -113,10 +113,13 @@ def compute_fingerprint(story):
         "width": WIDTH,
         "height": HEIGHT,
         "source_fps": SOURCE_FPS,
+        "final_fps": FINAL_FPS,
         "frames_per_shot": FRAMES_PER_SHOT,
         "qwen_model_id": QWEN_MODEL_ID,
+        "qwen_do_sample": QWEN_DO_SAMPLE,
         "base_seed": BASE_SEED,
         "reference_strength": REFERENCE_STRENGTH,
+        "reference_start_frame": REFERENCE_START_FRAME,
     }
 
     encoded = json.dumps(
