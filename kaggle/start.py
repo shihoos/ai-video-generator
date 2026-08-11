@@ -33,8 +33,6 @@ from config import (
     LTX_REPO as CONFIG_LTX_REPO,
     LTX_CONFIG,
     WORK_DIR,
-    CLIPS_DIR,
-    FRAMES_DIR,
     OUTPUT_DIR,
 )
 
@@ -47,6 +45,7 @@ from config import (
 
 from video_config import (
     QWEN_LOCAL_MODEL,
+    CLIPS_DIR,
 )
 
 
@@ -490,8 +489,6 @@ def setup_directories():
     directories = [
         PROJECT_ROOT,
         WORK_DIR,
-        CLIPS_DIR,
-        FRAMES_DIR,
         OUTPUT_DIR,
     ]
 
@@ -1011,10 +1008,6 @@ def print_final_status():
 
     print(
         f"Clips          : {CLIPS_DIR}"
-    )
-
-    print(
-        f"Frames         : {FRAMES_DIR}"
     )
 
     print(
