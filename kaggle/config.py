@@ -26,9 +26,17 @@ LTX_REPO = PROJECT_ROOT / "LTX-Video-0.9.8"
 LTX_CONFIG = LTX_REPO / "configs" / "ltxv-2b-0.9.8-distilled.yaml"
 
 # Temporary working directories
+#
+# NOTE: The actual story-clips directory is owned by
+# video_config.py (CLIPS_DIR = WORK_DIR / "story_clips").
+# This file intentionally does not redefine it, to avoid the
+# two-different-paths inconsistency that existed here before.
 WORK_DIR = PROJECT_ROOT / "work"
 OUTPUT_DIR = WORK_DIR / "output"
 
 # Make sure directories exist
-
+for directory in [
+    WORK_DIR,
+    OUTPUT_DIR,
+]:
     directory.mkdir(parents=True, exist_ok=True)
